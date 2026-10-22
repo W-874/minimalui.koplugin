@@ -1,3 +1,4 @@
+local Header = require("minimalui/header")
 local Menu = require("ui/widget/menu")
 
 -- Borrow only the renderer methods from the active native plugin. Never load
@@ -90,7 +91,7 @@ function LibraryView.apply(screen)
     current.browser.initGrid(screen, current.mode)
     screen.updateItems = current.covermenu.updateItems
     screen._recalculateDimen = current.renderer._recalculateDimen
-    screen._updateItemsBuildUI = current.renderer._updateItemsBuildUI
+    screen._updateItemsBuildUI = Header.listBuilder(current.renderer._updateItemsBuildUI)
     screen.getBookInfo = require("ui/widget/booklist").getBookInfo
     screen._do_cover_images = current.mode ~= "mosaic_text" and current.mode ~= "list_only_meta"
     screen._do_filename_only = current.mode == "list_image_filename"

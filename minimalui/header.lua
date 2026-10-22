@@ -33,6 +33,23 @@ local function group(items)
     return HorizontalGroup:new(items)
 end
 
+-- ListMenu shares one rule between its leading edge and all book separators.
+-- Replace only the first slot; leave its height and the shared rule untouched.
+function Header.listBuilder(original)
+    return function(widget, ...)
+        -- FileChooser renderers live on its class and change with display mode.
+        local build = original or getmetatable(widget)._updateItemsBuildUI
+        local selected = build(widget, ...)
+        if widget.display_mode_type == "list" then
+            local first = widget.item_group[1]
+            if getmetatable(first) == LineWidget then
+                widget.item_group[1] = LineWidget:new{ style = "none", dimen = first.dimen }
+            end
+        end
+        return selected
+    end
+end
+
 function Header:init()
     self.width = self.width or Screen:getWidth()
     if self.page then self.fixed_title = "KO/" .. self.page end

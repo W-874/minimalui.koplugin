@@ -61,9 +61,12 @@ function NativeHeaders:adapt(widget, page, is_browser)
     local record = {
         widget = widget, old = old, header = header, custom = widget.custom_title_bar,
         is_browser = is_browser,
+        build_ui = rawget(widget, "_updateItemsBuildUI"),
     }
     self.pages[#self.pages + 1] = record
     widget._minimal_header = record
+    record.builder = Header.listBuilder(record.build_ui)
+    widget._updateItemsBuildUI = record.builder
     widget.title_bar, widget.custom_title_bar = header, header
     replace(widget, old, header)
     if is_browser then
@@ -98,6 +101,9 @@ function NativeHeaders:prune()
         local retained = record.is_browser and record.widget == ui.file_chooser
             or not record.is_browser and UIManager:isWidgetShown(record.widget.show_parent or record.widget)
         if not retained then
+            if record.widget._updateItemsBuildUI == record.builder then
+                record.widget._updateItemsBuildUI = record.build_ui
+            end
             record.old:free()
             record.header:free()
             record.widget._minimal_header = nil
@@ -131,6 +137,9 @@ function NativeHeaders:restore()
     for _, record in ipairs(self.pages) do
         local widget = record.widget
         if widget._minimal_header == record then
+            if widget._updateItemsBuildUI == record.builder then
+                widget._updateItemsBuildUI = record.build_ui
+            end
             widget.title_bar, widget.custom_title_bar = record.old, record.custom
             replace(widget, record.header, record.old)
             widget._minimal_header = nil

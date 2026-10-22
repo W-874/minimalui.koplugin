@@ -26,6 +26,25 @@ local function finishEntry(bridge, ok, ...)
     return ...
 end
 
+local function finishMenu(bridge, ...)
+    local menu_items = bridge.controller.ui.menu.menu_items
+    local entry = menu_items and menu_items.filemanager
+    if not entry then
+        for _, tab in ipairs(bridge.controller.ui.menu.tab_item_table or {}) do
+            if tab.id == "filemanager" then entry = tab; break end
+        end
+    end
+    for i = #bridge.wrappers, 1, -1 do
+        local record = bridge.wrappers[i]
+        if record.method == "callback" and record.instance ~= entry then
+            if record.instance.callback == record.wrapper then record.instance.callback = record.original end
+            table.remove(bridge.wrappers, i)
+        end
+    end
+    bridge:watch(entry, "callback", false)
+    return ...
+end
+
 function Bridge:new(args)
     return setmetatable({
         controller = args.controller,
@@ -50,7 +69,12 @@ function Bridge:watch(instance, method, is_destination)
     end
     local original, fallback = rawget(instance, method), instance[method]
     local wrapper
-    if is_destination then
+    if is_destination == "menu" then
+        wrapper = function(...)
+            if not self.installed then return fallback(...) end
+            return finishMenu(self, fallback(...))
+        end
+    elseif is_destination then
         wrapper = function(...)
             -- Only the menu/status browser entries opt in. Reader Home and
             -- other native callers retain the normal FileManager startup.
@@ -80,6 +104,7 @@ function Bridge:install()
     local ui = self.controller.ui
     self:watch(ui, "showFileManager", true)
     self:watch(ui.status, "openFileBrowser", false)
+    self:watch(ui.menu, "setUpdateItemTable", "menu")
     local menu_items = ui.menu and ui.menu.menu_items
     self:watch(menu_items and menu_items.filemanager, "callback", false)
 end

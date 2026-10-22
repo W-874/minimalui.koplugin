@@ -21,8 +21,10 @@ local MinimalUI = WidgetContainer:extend{
 }
 
 function MinimalUI:isEnabled()
-    return not self.closed and G_reader_settings:readSetting(ENABLED_KEY,
-        G_reader_settings:readSetting(LEGACY_KEY, true)) ~= false
+    if self.closed then return false end
+    local enabled = G_reader_settings:readSetting(ENABLED_KEY)
+    if enabled == nil then enabled = G_reader_settings:readSetting(LEGACY_KEY) end
+    return enabled ~= false
 end
 
 function MinimalUI:isLive()
@@ -50,7 +52,10 @@ function MinimalUI:init()
         local destination = ReaderBridge.takeDestination()
         self.start_task = function()
             self.start_task = nil
-            if self:isEnabled() then self.native_headers:apply() end
+            if self:isEnabled() then
+                self.native_headers:apply()
+                self:startClock()
+            end
             -- Post-init precedes UIManager:show(FileManager). Do not cover
             -- startup dialogs or revive a FileManager already closed for reading.
             if self:isEnabled() and self:isLive()
@@ -61,6 +66,49 @@ function MinimalUI:init()
         UIManager:nextTick(self.start_task)
     end)
 end
+
+-- One minute-aligned task per FileManager, never a timer per page/widget.
+function MinimalUI:stopClock()
+    if self.clock_task then UIManager:unschedule(self.clock_task) end
+    self.clock_task = nil
+end
+
+function MinimalUI:refreshClock()
+    for i = #UIManager._window_stack, 1, -1 do
+        local widget = UIManager._window_stack[i].widget
+        local header = widget.header or widget.title_bar or widget.titlebar
+        if header and header.refreshStatus then header:refreshStatus(); return end
+        if widget.covers_fullscreen then return end
+    end
+end
+
+function MinimalUI:startClock()
+    self:stopClock()
+    if not self:isEnabled() or self.ui.document then return end
+    self:refreshClock()
+    if not self.clock_tick then
+        self.clock_tick = function()
+            self.clock_task = nil
+            if self:isEnabled() and self:isLive() then self:startClock() end
+        end
+    end
+    self.clock_task = self.clock_tick
+    UIManager:scheduleIn(60 - os.time() % 60, self.clock_task)
+end
+
+function MinimalUI:onSuspend()
+    self:stopClock()
+end
+
+function MinimalUI:onResume()
+    self:startClock()
+end
+
+function MinimalUI:onCharging()
+    if self:isEnabled() then self:refreshClock() end
+end
+
+MinimalUI.onNotCharging = MinimalUI.onCharging
 
 function MinimalUI:rememberFocus()
     if self.screen then
@@ -274,6 +322,7 @@ end
 
 function MinimalUI:onCloseWidget()
     self.closed = true
+    self:stopClock()
     if self.reader_bridge then self.reader_bridge:restore() end
     self:restoreBrowserNavigation()
     if self.native_headers then self.native_headers:restore() end
@@ -290,6 +339,15 @@ MinimalUI.stopPlugin = MinimalUI.onCloseWidget
 
 function MinimalUI:addToMainMenu(menu_items)
     if self.closed then return end
+    menu_items.minimalui_folder_actions = {
+        text = _("Current folder actions"),
+        sorting_hint = "filemanager_settings",
+        enabled_func = function() return self:isEnabled() end,
+        callback = function()
+            self.ui.menu:onCloseFileManagerMenu()
+            self.ui:onShowPlusMenu()
+        end,
+    }
     menu_items.minimal_ui = {
         text = _("Minimal UI"),
         sorting_hint = "more_tools",
@@ -313,8 +371,10 @@ function MinimalUI:addToMainMenu(menu_items)
                     if enabled then
                         self:bindBrowserNavigation()
                         self.native_headers:apply()
-                        self:showHome()
+                        self:startClock()
+                        if UIManager:getTopmostVisibleWidget() == self.ui then self:showHome() end
                     else
+                        self:stopClock()
                         self:restoreBrowserNavigation()
                         self.native_headers:restore()
                         self:closeScreen()

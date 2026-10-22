@@ -1,7 +1,8 @@
 -- Loads the native cover of exactly one book (custom cover first), scaled to fit.
--- The native BookInfo:getCoverImage() is not used: if getCoverPageImage() raises, it leaves
--- the document open and its DocumentRegistry refcount leaked. This runs the same registry
--- chain with every step protected so the document is always closed.
+-- Static custom images avoid opening a book; other covers use the native registry.
+-- The fallback protects the BookInfo:getCoverImage() registry chain: unlike that
+-- helper, it always closes the document even if getCoverPageImage() raises.
+local CanvasContext = require("document/canvascontext")
 local DocSettings = require("docsettings")
 local DocumentRegistry = require("document/documentregistry")
 local RenderImage = require("ui/renderimage")
@@ -34,6 +35,45 @@ local function extract(file)
     return bb
 end
 
+-- Static custom images use the selected provider's exact decoder/rasterizer,
+-- without DocumentRegistry's two GC sweeps or the full-size cover copies.
+local function extractCustomImage(file)
+    local extension = file:match("%.([^.]+)$")
+    extension = extension and extension:lower()
+    if extension ~= "jpg" and extension ~= "jpeg" and extension ~= "png" then return end
+
+    local doc, page, bb
+    local ok = pcall(function()
+        local provider = DocumentRegistry:getProvider(file)
+        if not provider then return end
+        if provider.provider == "picdocument" then
+            local Pic = require("ffi/pic")
+            Pic.color = CanvasContext.is_color_rendering_enabled
+            doc = Pic.openDocument(file)
+            bb = doc.image_bb
+            doc.image_bb = nil -- transfer ownership before closing the image document
+        elseif provider.provider == "mupdf" and G_defaults:readSetting("DKOPTREADER_CONFIG_TEXT_WRAP") ~= 1 then
+            -- Same page, Canvas-sized raster, draw context and BB type as
+            -- KoptInterface:getCoverPageImage, before the usual Home scaling.
+            doc = require("ffi/mupdf").openDocument(file)
+            doc:setColorRendering(CanvasContext.is_color_rendering_enabled)
+            page = doc:openPage(1)
+            local dc = require("ffi/drawcontext").new()
+            local width, height = page:getSize(dc)
+            local zoom = math.min(CanvasContext:getWidth() / width, CanvasContext:getHeight() / height)
+            dc:setZoom(zoom)
+            bb = page:draw_new(dc, math.ceil(width * zoom - 0.001), math.ceil(height * zoom - 0.001), 0, 0)
+        end
+    end)
+    if page then pcall(page.close, page) end
+    if doc then
+        local closed, close_err = pcall(doc.close, doc)
+        if not closed then logger.warn("minimalui cover: close failed", file, close_err) end
+    end
+    if ok then return bb end
+    freeBB(bb)
+end
+
 local function customCoverFile(path)
     local ok, file = pcall(DocSettings.findCustomCoverFile, DocSettings, path)
     if ok and type(file) == "string" and file ~= "" then return file end
@@ -60,7 +100,10 @@ function Cover.load(path, height, max_width)
 
     local bb, err
     local custom = customCoverFile(path)
-    if custom then bb, err = extract(custom) end
+    if custom then
+        bb = extractCustomImage(custom)
+        if not bb then bb, err = extract(custom) end
+    end
     if not bb then bb, err = extract(path) end
     if not bb then return nil, err end
 

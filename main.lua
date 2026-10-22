@@ -1,12 +1,16 @@
 -- Minimal UI: owns Home/Library; KOReader owns menus, browser and reader.
 -- Minimal UI plugin; install the repository as minimalui.koplugin.
 local Books = require("minimalui/books")
+local ConfirmBox = require("ui/widget/confirmbox")
 local FileManager = require("apps/filemanager/filemanager")
+local Home = require("minimalui/home")
 local InfoMessage = require("ui/widget/infomessage")
 local MinimalScreen = require("minimalui/screen")
+local NativeHeaders = require("minimalui/nativeheaders")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local filemanagerutil = require("apps/filemanager/filemanagerutil")
+local lfs = require("libs/libkoreader-lfs")
 local _ = require("gettext")
 
 local ENABLED_KEY = "minimalui_enabled"
@@ -30,10 +34,12 @@ function MinimalUI:init()
     if self.ui.document then return end
     self.closed = false
     self.focus = {}
+    self.native_headers = NativeHeaders:new{ controller = self }
     self.ui.menu:registerToMainMenu(self)
     self.ui:registerPostInitCallback(function()
         self.start_task = function()
             self.start_task = nil
+            if self:isEnabled() then self.native_headers:apply() end
             -- Post-init precedes UIManager:show(FileManager). Do not cover
             -- startup dialogs or revive a FileManager already closed for reading.
             if self:isEnabled() and self:isLive()
@@ -47,27 +53,38 @@ end
 
 function MinimalUI:rememberFocus()
     if self.screen then
-        local index = self.screen:focusIndex()
-        local item = self.screen.item_table[index]
-        self.focus[self.view] = item and item.id
+        self.focus[self.view] = self.screen:getFocusId()
     end
 end
 
-function MinimalUI:showView(view, title, items)
+function MinimalUI:showView(view, title, items, book)
     if not self:isEnabled() or not self:isLive() then return true end
+    local old = self.screen
+    if old and UIManager:getTopmostVisibleWidget() ~= old then return true end
     self:rememberFocus()
-    self.view = view
     local index = 1
     for i, item in ipairs(items) do
         if item.id == self.focus[view] then index = i; break end
     end
-    if self.screen then
-        self.screen:setItems(title, items, index)
-    else
-        self.screen = MinimalScreen:new{ controller = self, title = title, item_table = items }
-        self.screen:setItems(title, items, index)
-        UIManager:show(self.screen)
+    if old and self.view == view then
+        if view == "home" then old:setContent(items, book, index)
+        else old:setItems(title, items, index) end
+        return true
     end
+    if self.layout_task then
+        UIManager:unschedule(self.layout_task)
+        self.layout_task = nil
+    end
+    local screen
+    if view == "home" then
+        screen = Home:new{ controller = self, item_table = items, book = book, selected = index }
+    else
+        screen = MinimalScreen:new{ controller = self, title = title, item_table = items }
+        screen:setItems(title, items, index)
+    end
+    self.screen, self.view = screen, view
+    UIManager:show(screen)
+    if old then UIManager:close(old) end
     return true
 end
 
@@ -78,16 +95,18 @@ function MinimalUI:showHome()
     if book then
         items[#items + 1] = {
             id = "continue",
-            text = _("Continue reading") .. ": " .. book.title,
-            mandatory = book.fraction and string.format("%d%%", math.floor(book.fraction * 100 + 0.5)),
+            text = book.title,
             callback = function() self:openBook(book.path) end,
         }
     end
-    items[#items + 1] = { id = "library", text = _("Library"), callback = function() self:showLibrary() end }
+    items[#items + 1] = { id = "library", text = _("LIBRARY"), callback = function() self:showLibrary() end }
     items[#items + 1] = {
-        id = "browser", text = _("File browser"), callback = function() self:showFileBrowser() end,
+        id = "history", text = _("HISTORY"), callback = function() self.ui.history:onShowHist() end,
     }
-    return self:showView("home", _("Minimal UI"), items)
+    items[#items + 1] = {
+        id = "browser", text = _("FILE BROWSER"), callback = function() self:showFileBrowser() end,
+    }
+    return self:showView("home", _("Minimal UI"), items, book)
 end
 
 function MinimalUI:showLibrary()
@@ -103,7 +122,8 @@ function MinimalUI:showLibrary()
         for _, book in ipairs(books) do
             local path = book.path
             items[#items + 1] = {
-                id = path, text = book.title, callback = function() self:openBook(path) end,
+                id = path, path = path, file = path, text = book.title, is_file = true,
+                dim = false, attr = lfs.attributes(path), mandatory = "", callback = function() self:openBook(path) end,
             }
         end
     end
@@ -115,6 +135,14 @@ function MinimalUI:showNativeMenu()
     local menu = self.ui.menu
     if not (menu.menu_container and UIManager:isWidgetShown(menu.menu_container)) then
         menu:onShowMenu()
+        local container = menu.menu_container
+        if container then
+            local on_close = container.onCloseWidget
+            container.onCloseWidget = function(widget, ...)
+                if on_close then on_close(widget, ...) end
+                if self.view == "library" then self:queueLayout() end
+            end
+        end
     end
     return true -- keep Home/Library in the stack, with its focus intact
 end
@@ -133,7 +161,16 @@ end
 
 function MinimalUI:back()
     if self.view == "library" then return self:showHome() end
-    -- Home is the root, so Back stays here. Exit remains in KOReader's menu.
+    if self:isEnabled() and self:isLive() and self.screen
+            and UIManager:getTopmostVisibleWidget() == self.screen then
+        UIManager:show(ConfirmBox:new{
+            text = _("Exit KOReader?"),
+            ok_text = _("Exit"),
+            ok_callback = function()
+                if self:isEnabled() and self:isLive() then self.ui.menu:exitOrRestart() end
+            end,
+        })
+    end
     return true
 end
 
@@ -143,7 +180,8 @@ function MinimalUI:closeScreen()
 end
 
 function MinimalUI:screenClosed(screen)
-    if self.screen == screen then self.screen = nil end
+    if self.screen ~= screen then return end
+    self.screen = nil
     if self.layout_task then
         UIManager:unschedule(self.layout_task)
         self.layout_task = nil
@@ -151,10 +189,48 @@ function MinimalUI:screenClosed(screen)
 end
 
 function MinimalUI:showFileBrowser()
-    -- Native FM is already present as the service host. Expose it explicitly;
-    -- preserve its directory, Back behavior and input bindings.
+    self:rememberFocus()
+    self:bindBrowserNavigation()
     self:closeScreen()
     return true
+end
+
+function MinimalUI:restoreBrowserNavigation()
+    for _, hook in ipairs(self.browser_hooks or {}) do
+        if rawget(hook.target, hook.name) == hook.handler then
+            hook.target[hook.name] = hook.original
+        end
+    end
+    self.browser_hooks = nil
+    self.browser_chooser = nil
+end
+
+function MinimalUI:bindBrowserNavigation()
+    local chooser = self.ui.file_chooser
+    if not self:isEnabled() or not chooser then return end
+    if self.browser_chooser == chooser then return end
+    self:restoreBrowserNavigation()
+    self.browser_chooser, self.browser_hooks = chooser, {}
+    local function bind(target, name)
+        local original, fallback = rawget(target, name), target[name]
+        local handler = function(widget, ...)
+            if self:isEnabled() and self:isLive() and not self.screen
+                    and UIManager:getTopmostVisibleWidget() == self.ui then
+                return self:showHome()
+            end
+            if fallback then return fallback(widget, ...) end
+        end
+        self.browser_hooks[#self.browser_hooks + 1] = {
+            target = target, name = name, original = original, handler = handler,
+        }
+        target[name] = handler
+    end
+    -- FileChooser receives input before its FileManager parent. Bind only
+    -- these live instances, never the shared classes or global input flow.
+    bind(chooser, "onBack")
+    bind(chooser, "onClose") -- native few-key Back is mapped to Close
+    bind(chooser, "onHome")
+    bind(self.ui, "onHome") -- also handles the native title bar Home button
 end
 
 function MinimalUI:queueLayout()
@@ -167,8 +243,12 @@ function MinimalUI:queueLayout()
     UIManager:nextTick(self.layout_task)
 end
 
--- FM reinit sends dimensions to its children, not to our window above it.
-MinimalUI.onSetDimensions = MinimalUI.queueLayout
+-- FM reinit replaces FileChooser and directs dimensions to its own children.
+function MinimalUI:onSetDimensions()
+    self:bindBrowserNavigation()
+    if self.native_headers and self:isEnabled() then self.native_headers:apply() end
+    self:queueLayout()
+end
 
 function MinimalUI:onShowingReader()
     if self.screen then self.ui:onSetupShowReader() end
@@ -178,6 +258,8 @@ end
 
 function MinimalUI:onCloseWidget()
     self.closed = true
+    self:restoreBrowserNavigation()
+    if self.native_headers then self.native_headers:restore() end
     if self.start_task then
         UIManager:unschedule(self.start_task)
         self.start_task = nil
@@ -211,7 +293,15 @@ function MinimalUI:addToMainMenu(menu_items)
                     local enabled = not self:isEnabled()
                     G_reader_settings:saveSetting(ENABLED_KEY, enabled)
                     self.ui.menu:onCloseFileManagerMenu()
-                    if enabled then self:showHome() else self:closeScreen() end
+                    if enabled then
+                        self:bindBrowserNavigation()
+                        self.native_headers:apply()
+                        self:showHome()
+                    else
+                        self:restoreBrowserNavigation()
+                        self.native_headers:restore()
+                        self:closeScreen()
+                    end
                 end,
             },
         },

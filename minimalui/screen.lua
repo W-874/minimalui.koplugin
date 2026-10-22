@@ -1,9 +1,10 @@
--- Temporary native-component view, not the final Home/Library design.
+-- Library keeps its own navigation while borrowing the active native renderer.
 local Device = require("device")
 local Geom = require("ui/geometry")
 local GestureRange = require("ui/gesturerange")
+local Header = require("minimalui/header")
+local LibraryView = require("minimalui/libraryview")
 local Menu = require("ui/widget/menu")
-local TitleBar = require("ui/widget/titlebar")
 local UIManager = require("ui/uimanager")
 local _ = require("gettext")
 local Screen = Device.screen
@@ -19,19 +20,19 @@ local MinimalScreen = Menu:extend{
 function MinimalScreen:init()
     self.width, self.height = Screen:getWidth(), Screen:getHeight()
     self.is_enable_shortcut = Device:hasKeyboard()
-    self.custom_title_bar = TitleBar:new{
+    self.custom_title_bar = Header:new{
         width = self.width,
-        fullscreen = true,
-        title = self.title,
-        left_icon = "home",
-        left_icon_tap_callback = function() return self.controller:showHome() end,
-        right_icon = "appbar.menu",
-        right_icon_tap_callback = function() return self.controller:showNativeMenu() end,
+        page = "LIBRARY",
         show_parent = self,
+        menu_callback = function() return self.controller:showNativeMenu() end,
+        home_callback = function() return self.controller:showHome() end,
     }
+    LibraryView.apply(self)
     Menu.init(self)
+    -- Released Menu versions bind keys inline and never call registerKeyEvents.
+    self:bindKeys()
     if Device:isTouchDevice() then
-        -- The native TitleBar measures its height from fonts, padding and DPI.
+        -- Keep this region aligned with the shared Header's complete height.
         self.ges_events.MinimalMenu = {
             GestureRange:new{
                 ges = "tap",
@@ -39,10 +40,10 @@ function MinimalScreen:init()
             },
         }
     end
+    LibraryView.remember(self)
 end
 
-function MinimalScreen:registerKeyEvents()
-    Menu.registerKeyEvents(self) -- native focus, paging and keyboard mappings
+function MinimalScreen:bindKeys()
     if Device:hasKeys() then
         self.key_events.Home = { { "Home" } }
         self.key_events.LeftButtonTap = nil -- Menu must open settings, not the Home icon
@@ -75,9 +76,6 @@ end
 
 MinimalScreen.onCloseAllMenus = MinimalScreen.onClose
 
-function MinimalScreen:onLeftButtonTap()
-    return self:onHome()
-end
 
 function MinimalScreen:onSwipe(arg, ges)
     if ges.direction == "south" and ges.pos.y < self.title_bar:getHeight() then
@@ -89,19 +87,38 @@ end
 
 function MinimalScreen:focusIndex()
     local focused = self:getFocusItem()
-    return focused and focused.entry and focused.entry.idx or self:getFirstVisibleItemIndex()
+    return focused and focused.entry and focused.entry.idx
+        or ((self.page or 1) - 1) * (self.perpage or 1) + 1
+end
+
+function MinimalScreen:getFocusId()
+    local item = self.item_table[self:focusIndex()]
+    return item and item.id
 end
 
 function MinimalScreen:setItems(title, items, index)
     self.title = title
+    self.item_table = items
     self.itemnumber = index or 1
+    if LibraryView.changed(self) then
+        self:rebuild(self.itemnumber)
+        return
+    end
     self:switchItemTable(title, items, self.itemnumber)
 end
 
-function MinimalScreen:rebuild()
-    local index = self:focusIndex()
+function MinimalScreen:refreshDisplayMode()
+    if not LibraryView.changed(self) then return false end
+    self:rebuild()
+    return true
+end
+
+function MinimalScreen:rebuild(index)
+    index = index or self:focusIndex()
+    local stack, paths = self.item_table_stack, self.paths
     -- Rebuild in place: replacing the window would put Home above an open
     -- native menu/dialog, changing the input recipient during rotation.
+    LibraryView.release(self)
     self:free()
     self[1] = nil
     self.ges_events = nil
@@ -110,6 +127,7 @@ function MinimalScreen:rebuild()
     Menu._init(self)
     self:init()
     self:setItems(self.title, self.item_table, index)
+    self.item_table_stack, self.paths = stack, paths
     UIManager:setDirty(self, "ui")
 end
 
@@ -132,17 +150,19 @@ end
 
 function MinimalScreen:onPhysicalKeyboardConnected()
     Menu.onPhysicalKeyboardConnected(self) -- refresh native cached focus maps
+    self:bindKeys()
     self.controller:queueLayout()
 end
 
 function MinimalScreen:onPhysicalKeyboardDisconnected()
     Menu.onPhysicalKeyboardDisconnected(self)
+    self:bindKeys()
     self.controller:queueLayout()
 end
 
 function MinimalScreen:onCloseWidget()
     self.controller:screenClosed(self)
-    Menu.onCloseWidget(self)
+    if not LibraryView.release(self) then Menu.onCloseWidget(self) end
     self:free()
 end
 

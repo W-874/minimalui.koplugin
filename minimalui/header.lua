@@ -77,7 +77,8 @@ function Header:init()
     if self.menu_button then table.insert(self.buttons, self.menu_button) end
     if self.home_button then table.insert(self.buttons, self.home_button) end
 
-    local left_items, right_items = {}, {}
+    local left_items = { HorizontalSpan:new{ width = Screen:scaleBySize(12) } }
+    local right_items = {}
     if self.menu_button then table.insert(left_items, self.menu_button) end
     if self.home_button then table.insert(left_items, self.home_button) end
     for _, extra in ipairs(self.extra_buttons or {}) do
@@ -97,7 +98,7 @@ function Header:init()
     if self.status_widget:getSize().w > 0 then
         table.insert(right_items, HorizontalSpan:new{ width = Size.span.horizontal_small })
         table.insert(right_items, self.status_widget)
-        table.insert(right_items, HorizontalSpan:new{ width = Size.padding.default })
+        table.insert(right_items, HorizontalSpan:new{ width = Screen:scaleBySize(12) })
     end
     self.right_group = group(right_items)
     self.left_width = self.left_group and self.left_group:getSize().w or 0

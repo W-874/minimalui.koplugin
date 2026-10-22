@@ -116,7 +116,7 @@ function MinimalUI:rememberFocus()
     end
 end
 
-function MinimalUI:showView(view, title, items, book)
+function MinimalUI:showView(view, title, items, book, home_data)
     if not self:canShowView() then return true end
     local old = self.screen
     self:rememberFocus()
@@ -125,7 +125,7 @@ function MinimalUI:showView(view, title, items, book)
         if item.id == self.focus[view] then index = i; break end
     end
     if old and self.view == view then
-        if view == "home" then old:setContent(items, book, index)
+        if view == "home" then old:setContent(items, book, index, home_data)
         else old:setItems(title, items, index) end
         return true
     end
@@ -136,7 +136,7 @@ function MinimalUI:showView(view, title, items, book)
     self.layout_required = nil
     local screen
     if view == "home" then
-        screen = Home:new{ controller = self, item_table = items, book = book, selected = index }
+        screen = Home:new{ controller = self, item_table = items, book = book, selected = index, home_data = home_data }
     else
         screen = MinimalScreen:new{ controller = self, title = title, item_table = items, itemnumber = index }
     end
@@ -149,12 +149,24 @@ end
 function MinimalUI:showHome()
     if not self:canShowView() then return true end
     local items = {}
-    local book = Books.lastBook()
+    local path = G_reader_settings:readSetting("lastfile")
+    local book = Books.isFile(path) and { path = path, title = (path:match("([^/]+)$") or path):gsub("%.[^.]+$", "") } or nil
+    self.home_source_cache = self.home_source_cache or {}
+    local home_data = require("minimalui/homesource").collect(self.ui, book, self.library_count, self.home_source_cache)
     if book then
         items[#items + 1] = {
             id = "continue",
             text = book.title,
+            file = book.path, book = book,
             callback = function() self:openBook(book.path) end,
+        }
+    end
+    for i, recent in ipairs(home_data.recent) do
+        local path = recent.path
+        items[#items + 1] = {
+            id = "recent:" .. path, kind = "recent", recent_index = i,
+            file = path, book = recent, text = recent.title,
+            callback = function() self:openBook(path) end,
         }
     end
     items[#items + 1] = { id = "library", text = _("LIBRARY"), callback = function() self:showLibrary() end }
@@ -164,12 +176,13 @@ function MinimalUI:showHome()
     items[#items + 1] = {
         id = "browser", text = _("FILE BROWSER"), callback = function() self:showFileBrowser() end,
     }
-    return self:showView("home", _("Minimal UI"), items, book)
+    return self:showView("home", _("Minimal UI"), items, book, home_data)
 end
 
 function MinimalUI:showLibrary()
     if not self:canShowView() then return true end
     local books, reason = Books.scan() -- explicit entry only; never on focus/menu/resize
+    self.library_count = books and #books or nil
     local items = {}
     if not books or #books == 0 then
         items[1] = {
@@ -248,6 +261,7 @@ function MinimalUI:screenClosed(screen)
 end
 
 function MinimalUI:showFileBrowser()
+    self.library_count = nil -- native file operations may change Library contents
     self:rememberFocus()
     self:bindBrowserNavigation()
     self:closeScreen()
@@ -337,6 +351,20 @@ end
 -- controls plugin loading). Use the same idempotent teardown as the host.
 MinimalUI.stopPlugin = MinimalUI.onCloseWidget
 
+function MinimalUI:onInvalidateMetadataCache()
+    self.home_source_cache = nil
+end
+
+MinimalUI.onBookMetadataChanged = MinimalUI.onInvalidateMetadataCache
+
+function MinimalUI:onSaveSettings()
+    if self.ui.document and self:isEnabled() then require("minimalui/homesource").capture(self.ui) end
+end
+
+-- Native Reader closes its document before the dialog's final FlushSettings.
+-- Capture live TOC/position here; the native save that follows persists both.
+MinimalUI.onCloseDocument = MinimalUI.onSaveSettings
+
 function MinimalUI:addToMainMenu(menu_items)
     if self.closed then return end
     menu_items.minimalui_folder_actions = {
@@ -380,6 +408,30 @@ function MinimalUI:addToMainMenu(menu_items)
                         self:closeScreen()
                     end
                 end,
+            },
+            {
+                text = _("Home appearance"),
+                enabled_func = function() return self:isEnabled() end,
+                sub_item_table = (function()
+                    local entries = {}
+                    for _, option in ipairs({
+                        { "recent", _("Recent books") }, { "covers", _("Book covers") },
+                        { "metadata", _("Book information") }, { "stats", _("Reading statistics") },
+                        { "counts", _("Navigation details") },
+                    }) do
+                        local key = "minimalui_home_" .. option[1]
+                        entries[#entries + 1] = {
+                            text = option[2],
+                            checked_func = function() return G_reader_settings:readSetting(key) ~= false end,
+                            callback = function()
+                                G_reader_settings:saveSetting(key, G_reader_settings:readSetting(key) == false)
+                                self.ui.menu:onCloseFileManagerMenu()
+                                if self.view == "home" then self:showHome() end
+                            end,
+                        }
+                    end
+                    return entries
+                end)(),
             },
         },
     }

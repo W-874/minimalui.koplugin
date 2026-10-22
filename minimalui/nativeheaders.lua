@@ -347,6 +347,10 @@ function NativeHeaders:watch(instance, method, page, field, show_context, scan, 
         if field and not (field == "coll_list" and target.selected_collections ~= nil) then
             owner:adapt(target[field], page, false, show_context, opds_browser)
         end
+        if page == "HISTORY" and owner.controller.view == "home" and owner.controller.screen then
+            owner.controller.library_count = nil -- native history can delete documents
+            require("minimalui/libraryactions").queueRefresh(owner.controller.screen)
+        end
         if scan then
             for _, window in ipairs(UIManager._window_stack) do
                 local widget = window.widget

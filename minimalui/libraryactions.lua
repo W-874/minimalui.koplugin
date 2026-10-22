@@ -50,7 +50,13 @@ function LibraryActions.queueRefresh(screen)
         clearWaiter(screen)
         -- Native confirmations call success callbacks BEFORE removing their
         -- own window. Only this deferred, uncovered path may scan/rebuild.
-        controller:showLibrary()
+        if controller.view == "home" then
+            -- Explicit native actions may rewrite same-size sidecars in one second.
+            controller.home_source_cache = nil
+            controller:showHome()
+        else
+            controller:showLibrary()
+        end
     end
     UIManager:nextTick(screen._library_refresh_task)
 end
@@ -121,7 +127,10 @@ function LibraryActions.show(screen, item)
                 callback = function()
                     -- Leave the action dialog under the confirmation. Cancel
                     -- preserves it; only successful deletion closes/refreshes.
-                    FileManager.showDeleteFileDialog(ui, file, closeAndRefresh)
+                    FileManager.showDeleteFileDialog(ui, file, function()
+                        screen.controller.library_count = nil
+                        closeAndRefresh()
+                    end)
                 end,
             },
             {

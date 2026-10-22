@@ -1,6 +1,5 @@
 -- Read-only book access. No database, document rendering or cover decoding.
 local Device = require("device")
-local DocSettings = require("docsettings")
 local DocumentRegistry = require("document/documentregistry")
 local lfs = require("libs/libkoreader-lfs")
 local _ = require("gettext")
@@ -18,27 +17,6 @@ end
 
 function Books.isFile(path)
     return type(path) == "string" and lfs.attributes(path, "mode") == "file"
-end
-
-function Books.lastBook()
-    local path = G_reader_settings:readSetting("lastfile")
-    if not Books.isFile(path) then return nil end
-    local title = (path:match("([^/]+)$") or path):gsub("%.[^.]+$", "")
-    local fraction
-    local ok, props, percent = pcall(function()
-        local settings = DocSettings:open(path)
-        return settings:readSetting("doc_props"), settings:readSetting("percent_finished")
-    end)
-    if ok then
-        if type(props) == "table" then
-            local saved_title = props.display_title or props.title
-            if type(saved_title) == "string" and saved_title ~= "" then title = saved_title end
-        end
-        if type(percent) == "number" and percent == percent then
-            fraction = math.max(0, math.min(percent, 1))
-        end
-    end
-    return { path = path, title = title, fraction = fraction }
 end
 
 function Books.scan()

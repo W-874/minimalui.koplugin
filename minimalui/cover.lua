@@ -7,6 +7,7 @@ local DocSettings = require("docsettings")
 local DocumentRegistry = require("document/documentregistry")
 local RenderImage = require("ui/renderimage")
 local logger = require("logger")
+local lfs = require("libs/libkoreader-lfs")
 
 local Cover = {}
 
@@ -77,6 +78,35 @@ end
 local function customCoverFile(path)
     local ok, file = pcall(DocSettings.findCustomCoverFile, DocSettings, path)
     if ok and type(file) == "string" and file ~= "" then return file end
+end
+
+-- Retained Home buffers are reusable only while their source and raster context
+-- match. Native metadata events also invalidate them (same-second writes).
+function Cover.signature(path)
+    local ok, signature = pcall(function()
+        local custom = customCoverFile(path)
+        local source = custom or path
+        local attr = lfs.attributes(source)
+        local book = custom and lfs.attributes(path) or attr
+        if not attr or attr.mode ~= "file" or not book or book.mode ~= "file" then return end
+        -- getProvider() opens per-file settings. Fingerprint its input instead.
+        local sidecar = DocSettings:findSidecarFile(source)
+        local settings = sidecar and lfs.attributes(sidecar)
+        local providers = G_reader_settings:readSetting("provider")
+        local suffix = source:match("%.([^.]+)$")
+        local provider = type(providers) == "table" and suffix and providers[suffix:lower()]
+        return table.concat({
+            source, tostring(attr.size), tostring(attr.modification), tostring(attr.change),
+            tostring(attr.ino), tostring(attr.dev), tostring(book.size), tostring(book.modification),
+            tostring(sidecar), tostring(settings and settings.size),
+            tostring(settings and settings.modification), tostring(settings and settings.change),
+            tostring(settings and settings.ino), tostring(provider),
+            tostring(CanvasContext.is_color_rendering_enabled),
+            tostring(CanvasContext:getWidth()), tostring(CanvasContext:getHeight()),
+            tostring(G_defaults:readSetting("DKOPTREADER_CONFIG_TEXT_WRAP")),
+        }, "\0")
+    end)
+    return ok and signature or nil
 end
 
 -- Aspect-preserving size that fits both height and max_width.

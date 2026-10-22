@@ -2,6 +2,7 @@
 -- Minimal UI plugin; install the repository as minimalui.koplugin.
 local Books = require("minimalui/books")
 local ConfirmBox = require("ui/widget/confirmbox")
+local Device = require("device")
 local FileManager = require("apps/filemanager/filemanager")
 local Home = require("minimalui/home")
 local InfoMessage = require("ui/widget/infomessage")
@@ -13,6 +14,13 @@ local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local filemanagerutil = require("apps/filemanager/filemanagerutil")
 local _ = require("gettext")
 
+local Screen = Device.screen
+
+local function inputFlags()
+    -- Include hardware capabilities that change native Library/header layouts.
+    return (Device:hasKeys() and 1 or 0) + (Device:hasFewKeys() and 2 or 0)
+        + (Device:hasKeyboard() and 4 or 0) + (Device:isTouchDevice() and 8 or 0)
+end
 local ENABLED_KEY = "minimalui_enabled"
 local LEGACY_KEY = "minimalhome_autoshow"
 local MinimalUI = WidgetContainer:extend{
@@ -33,8 +41,9 @@ function MinimalUI:isLive()
 end
 
 function MinimalUI:canShowView()
-    return self:isEnabled() and self:isLive()
-        and (not self.screen or UIManager:getTopmostVisibleWidget() == self.screen)
+    if not self:isEnabled() or not self:isLive() then return false end
+    local top = UIManager:getTopmostVisibleWidget()
+    return top == (self.screen or self.ui)
 end
 
 
@@ -46,6 +55,7 @@ function MinimalUI:init()
         return
     end
     self.focus = {}
+    self:bindMetadataEvents()
     self.native_headers = NativeHeaders:new{ controller = self }
     self.ui.menu:registerToMainMenu(self)
     self.ui:registerPostInitCallback(function()
@@ -136,9 +146,16 @@ function MinimalUI:showView(view, title, items, book, home_data)
     self.layout_required = nil
     local screen
     if view == "home" then
-        screen = Home:new{ controller = self, item_table = items, book = book, selected = index, home_data = home_data }
+        screen = self.home_screen
+        if screen then
+            screen:setContent(items, book, index, home_data)
+        else
+            screen = Home:new{ controller = self, item_table = items, book = book, selected = index, home_data = home_data }
+            self.home_screen = screen
+        end
     else
         screen = MinimalScreen:new{ controller = self, title = title, item_table = items, itemnumber = index }
+        screen._minimalui_input_flags = inputFlags()
     end
     self.screen, self.view = screen, view
     UIManager:show(screen)
@@ -250,6 +267,16 @@ function MinimalUI:closeScreen()
     if screen then UIManager:close(screen) end
 end
 
+function MinimalUI:releaseScreens()
+    local home, screen = self.home_screen, self.screen
+    -- Clear ownership before CloseWidget: an active Home must dispose, not park.
+    self.home_screen = nil
+    self:closeScreen()
+    if home and home ~= screen then home:dispose() end
+    self.home_source_cache = nil
+    self.library_count = nil -- native file operations can run while Home is disabled
+end
+
 function MinimalUI:screenClosed(screen)
     if self.screen ~= screen then return end
     self.screen = nil
@@ -261,6 +288,7 @@ function MinimalUI:screenClosed(screen)
 end
 
 function MinimalUI:showFileBrowser()
+    if not self:canShowView() then return true end
     self.library_count = nil -- native file operations may change Library contents
     self:rememberFocus()
     self:bindBrowserNavigation()
@@ -315,7 +343,22 @@ function MinimalUI:queueLayout(display_only)
         local full = self.layout_required
         self.layout_task, self.layout_required = nil, nil
         if self:isLive() and self.screen == screen then
-            if full then screen:rebuild() else screen:refreshDisplayMode() end
+            if full then
+                if screen == self.home_screen then
+                    screen:rebuild() -- Home checks dimensions/keycaps itself.
+                else
+                    local inputs = inputFlags()
+                    if screen.width ~= Screen:getWidth() or screen.height ~= Screen:getHeight()
+                            or screen._minimalui_input_flags ~= inputs then
+                        screen:rebuild()
+                        screen._minimalui_input_flags = inputs
+                    else
+                        screen:refreshDisplayMode()
+                    end
+                end
+            else
+                screen:refreshDisplayMode()
+            end
         end
     end
     UIManager:nextTick(self.layout_task)
@@ -330,7 +373,7 @@ end
 
 function MinimalUI:onShowingReader()
     if self.screen then self.ui:onSetupShowReader() end
-    self:closeScreen()
+    self:releaseScreens()
     -- Do not consume this broadcast: the native host still needs to close.
 end
 
@@ -339,17 +382,46 @@ function MinimalUI:onCloseWidget()
     self:stopClock()
     if self.reader_bridge then self.reader_bridge:restore() end
     self:restoreBrowserNavigation()
+    self:restoreMetadataEvents()
     if self.native_headers then self.native_headers:restore() end
     if self.start_task then
         UIManager:unschedule(self.start_task)
         self.start_task = nil
     end
-    self:closeScreen()
+    self:releaseScreens()
 end
 
 -- The native plugin manager calls stopPlugin before disabling (restart still
 -- controls plugin loading). Use the same idempotent teardown as the host.
 MinimalUI.stopPlugin = MinimalUI.onCloseWidget
+
+function MinimalUI:bindMetadataEvents()
+    if self.metadata_hook or self.ui.document or not self:isEnabled() then return end
+    local original, fallback = rawget(self.ui, "handleEvent"), self.ui.handleEvent
+    local handler = function(widget, event, ...)
+        if not self.closed and (event.handler == "onInvalidateMetadataCache"
+                or event.handler == "onBookMetadataChanged") then
+            -- CoverBrowser can consume metadata events before this plugin.
+            -- The active Home receives broadcasts itself; only forward parked.
+            self.home_source_cache = nil
+            local home = self.home_screen
+            if home and home ~= self.screen then
+                home[event.handler](home, unpack(event.args, 1, event.args.n))
+            end
+        end
+        return fallback(widget, event, ...)
+    end
+    self.metadata_hook = { original = original, handler = handler }
+    self.ui.handleEvent = handler
+end
+
+function MinimalUI:restoreMetadataEvents()
+    local hook = self.metadata_hook
+    if hook and rawget(self.ui, "handleEvent") == hook.handler then
+        self.ui.handleEvent = hook.original
+    end
+    self.metadata_hook = nil
+end
 
 function MinimalUI:onInvalidateMetadataCache()
     self.home_source_cache = nil
@@ -398,6 +470,7 @@ function MinimalUI:addToMainMenu(menu_items)
                     self.ui.menu:onCloseFileManagerMenu()
                     if enabled then
                         self:bindBrowserNavigation()
+                        self:bindMetadataEvents()
                         self.native_headers:apply()
                         self:startClock()
                         if UIManager:getTopmostVisibleWidget() == self.ui then self:showHome() end
@@ -405,7 +478,8 @@ function MinimalUI:addToMainMenu(menu_items)
                         self:stopClock()
                         self:restoreBrowserNavigation()
                         self.native_headers:restore()
-                        self:closeScreen()
+                        self:releaseScreens()
+                        self:restoreMetadataEvents()
                     end
                 end,
             },

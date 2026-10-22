@@ -1,4 +1,6 @@
 -- Home is a bounded view of native history and the current reading snapshot.
+local bit = require("bit")
+local ffi = require("ffi")
 local Blitbuffer = require("ffi/blitbuffer")
 local Cover = require("minimalui/cover")
 local Device = require("device")
@@ -29,29 +31,78 @@ local Home = InputContainer:extend{
     stop_events_propagation = true,
 }
 
--- Home strings do not change on focus moves. Keep only their small rendered
--- buffers, owned by the existing widget tree and released with native free().
-local HomeText = TextWidget:extend{}
-
-function HomeText:paintTo(bb, x, y)
-    if self.home_bb and self.home_bb:getInverse() ~= bb:getInverse() then
-        self.home_bb:free()
-        self.home_bb = nil
+-- Matching native layouts copy physical scanlines directly, with or without
+-- CBB: its rotated copy still visits each pixel. BB4 also needs packed-byte
+-- copying even without rotation. Color conversion stays with the native API.
+local function copyPaint(dest, source, dx, dy, sx, sy, width, height)
+    local bbtype = dest:getType()
+    if bbtype ~= source:getType()
+            or dest:getRotation() ~= source:getRotation() or dest:getInverse() ~= source:getInverse() then
+        return dest:blitFrom(source, dx, dy, sx, sy, width, height)
     end
-    if not self.home_bb then
-        local size = self:getSize()
-        if size.w == 0 or size.h == 0 then return end
-        self.home_bb = Blitbuffer.new(size.w, size.h, Blitbuffer.TYPE_BB8)
-        self.home_bb:setInverse(bb:getInverse())
-        self.home_bb:fill(Blitbuffer.COLOR_WHITE)
-        TextWidget.paintTo(self, self.home_bb, 0, 0)
+    width, dx, sx = Blitbuffer.checkBounds(width, dx, sx, dest:getWidth(), source:getWidth())
+    height, dy, sy = Blitbuffer.checkBounds(height, dy, sy, dest:getHeight(), source:getHeight())
+    if width <= 0 or height <= 0 then return end
+    local logical_width, logical_height = width, height
+    local logical_dx, logical_dy, logical_sx, logical_sy = dx, dy, sx, sy
+    dx, dy, width, height = dest:getPhysicalRect(dx, dy, width, height)
+    sx, sy = source:getPhysicalRect(sx, sy, logical_width, logical_height)
+    if bbtype ~= Blitbuffer.TYPE_BB4 then
+        local bytes = dest:getBytesPerPixel()
+        local dp, sp = ffi.cast("uint8_t*", dest.data), ffi.cast("uint8_t*", source.data)
+        dp, sp = dp + dy * dest.stride + dx * bytes, sp + sy * source.stride + sx * bytes
+        if dx == 0 and sx == 0 and width == dest.w and width == source.w and dest.stride == source.stride then
+            ffi.copy(dp, sp, height * dest.stride)
+        else
+            for row = 0, height - 1 do
+                ffi.copy(dp + row * dest.stride, sp + row * source.stride, width * bytes)
+            end
+        end
+        return
     end
-    bb:blitFrom(self.home_bb, x, y, 0, 0, self.home_bb:getWidth(), self.home_bb:getHeight())
+    if dx % 2 ~= sx % 2 then
+        return dest:blitFrom(source, logical_dx, logical_dy, logical_sx, logical_sy, logical_width, logical_height)
+    end
+    for row = 0, height - 1 do
+        local dp = dest.data + (dy + row) * dest.stride
+        local sp = source.data + (sy + row) * source.stride
+        local tx, ox, remaining = dx, sx, width
+        if tx % 2 == 1 then
+            local pos = math.floor(tx / 2)
+            dp[pos] = bit.bor(bit.band(dp[pos], 240), bit.band(sp[math.floor(ox / 2)], 15))
+            tx, ox, remaining = tx + 1, ox + 1, remaining - 1
+        end
+        local pairs = math.floor(remaining / 2)
+        ffi.copy(dp + tx / 2, sp + ox / 2, pairs)
+        if remaining % 2 == 1 then
+            local pos, source_pos = tx / 2 + pairs, ox / 2 + pairs
+            dp[pos] = bit.bor(bit.band(dp[pos], 15), bit.band(sp[source_pos], 240))
+        end
+    end
 end
 
-function HomeText:free()
-    if self.home_bb then self.home_bb:free(); self.home_bb = nil end
-    TextWidget.free(self)
+local function invertFocus(bb, x, y, width, height)
+    if bb:getType() ~= Blitbuffer.TYPE_BB4 then return bb:invertRect(x, y, width, height) end
+    x, y, width, height = bb:getBoundedRect(x, y, width, height)
+    if width <= 0 or height <= 0 then return end
+    x, y, width, height = bb:getPhysicalRect(x, y, width, height)
+    for row = y, y + height - 1 do
+        local p = bb.data + row * bb.stride
+        local first, last = math.floor(x / 2), math.floor((x + width) / 2)
+        if x % 2 == 1 then p[first] = bit.bxor(p[first], 15); first = first + 1 end
+        for col = first, last - 1 do p[col] = bit.bxor(p[col], 255) end
+        if (x + width) % 2 == 1 then p[last] = bit.bxor(p[last], 240) end
+    end
+end
+
+local function paintBuffer(width, height, target)
+    local packed = target:getType() == Blitbuffer.TYPE_BB4
+    local rotation = target:getRotation()
+    local bb = Blitbuffer.new(rotation % 2 == 0 and width or height,
+        rotation % 2 == 0 and height or width, packed and Blitbuffer.TYPE_BB4 or Blitbuffer.TYPE_BB8)
+    bb:setRotation(rotation)
+    bb:setInverse(target:getInverse())
+    return bb
 end
 
 local function canvas(width, height)
@@ -81,7 +132,7 @@ local function text(value, size, bold, width, height, color, truncate_left)
     if not font_height or math.ceil(font_height) > height then
         face = Font:getFace("cfont", math.min(size, TextWidget:getFontSizeToFitHeight("cfont", height, 0)))
     end
-    return HomeText:new{
+    return TextWidget:new{
         text = tostring(value or ""), face = face,
         bold = bold, max_width = math.max(1, width), padding = 0,
         fgcolor = color or Blitbuffer.COLOR_BLACK, truncate_left = truncate_left,
@@ -119,6 +170,9 @@ end
 
 function Home:init()
     self.width, self.height = Screen:getWidth(), Screen:getHeight()
+    self.has_keys, self.few_keys = Device:hasKeys(), Device:hasFewKeys()
+    self.keyboard, self.touch = Device:hasKeyboard(), Device:isTouchDevice()
+    self.disposed = false
     self.dimen = Geom:new{ x = 0, y = 0, w = self.width, h = self.height }
     self.item_table = self.item_table or {}
     self.home_data = self.home_data or {}
@@ -126,7 +180,7 @@ function Home:init()
     self:bindKeys()
     self[1] = self:buildView()
     self.ges_events = {}
-    if Device:isTouchDevice() then
+    if self.touch then
         self.ges_events.MinimalTap = { GestureRange:new{ ges = "tap", range = self.dimen } }
         self.ges_events.MinimalHold = { GestureRange:new{ ges = "hold", range = self.dimen } }
         self.ges_events.MinimalSwipe = { GestureRange:new{ ges = "swipe", range = self.dimen } }
@@ -135,7 +189,7 @@ end
 
 function Home:bindKeys()
     self.key_events = {}
-    if not Device:hasKeys() then return end
+    if not self.has_keys then return end
     self.key_events.MinimalUp = { { "Up" } }
     self.key_events.MinimalDown = { { "Down" } }
     self.key_events.MinimalActivate = { { { "Press", "Enter" } } }
@@ -146,14 +200,14 @@ function Home:bindKeys()
     self.key_events.MinimalContext = {
         { "ContextMenu" }, { "Shift", "Press" }, { "ScreenKB", "Press" }, { "Sym", "AA" },
     }
-    if Device:hasFewKeys() then
+    if self.few_keys then
         self.key_events.MinimalBack = { { "Left" } }
         self.key_events.MinimalMenu = { { { "Menu", "Right" } } }
     else
         self.key_events.MinimalLeft = { { "Left" } }
         self.key_events.MinimalRight = { { "Right" } }
     end
-    if Device:hasKeyboard() then
+    if self.keyboard then
         self.key_events.MinimalLibrary = { { "L" } }
         self.key_events.MinimalHistory = { { "H" } }
         self.key_events.MinimalBrowser = { { "F" } }
@@ -188,7 +242,7 @@ function Home:getCover(path, height, width)
     local key = coverKey(path, height, width)
     local entry = self.cover_cache[key]
     if not entry then
-        entry = { bb = Cover.load(path, height, width) }
+        entry = { path = path, signature = Cover.signature(path), bb = Cover.load(path, height, width) }
         self.cover_cache[key] = entry
     end
     return entry.bb
@@ -203,9 +257,10 @@ function Home:bookCard(book, width, height, index, recent_index, cover_height, c
     local image_width = cover and cover:getWidth() or 0
     local text_width = math.max(1, width - 2 * pad - image_width - gap)
     local text_x = pad + (not featured and cover and image_width + gap or 0)
-    local badge_size = self.keyboard and math.max(12, math.floor(Screen:scaleBySize(22) * ratio)) or 0
-    local badge_over_cover = self.keyboard and cover and not featured
-    local title_width = text_width - (self.keyboard and not badge_over_cover and badge_size + math.max(3, gap) or 0)
+    local show_badge = self.keyboard and not featured
+    local badge_size = show_badge and math.max(12, math.floor(Screen:scaleBySize(22) * ratio)) or 0
+    local badge_over_cover = show_badge and cover
+    local title_width = text_width - (show_badge and not badge_over_cover and badge_size + math.max(3, gap) or 0)
     local content = canvas(width, height)
     local line = math.max(10, math.floor(Screen:scaleBySize(featured and 23 or 18) * ratio))
     local progress_height = math.max(2, math.floor(Screen:scaleBySize(featured and 7 or 4) * ratio))
@@ -245,6 +300,8 @@ function Home:bookCard(book, width, height, index, recent_index, cover_height, c
     end
     local focus = frame(content, Blitbuffer.COLOR_WHITE, featured and 0 or Size.line.medium)
     focus.invert = self.selected == index
+    -- The body snapshot is unfocused; focus is composed without repainting text.
+    self.focus_exclusions[index] = {}
     self.focus_frames[index] = focus
     local layers = canvas(width, height)
     place(layers, focus, 0, 0)
@@ -252,14 +309,18 @@ function Home:bookCard(book, width, height, index, recent_index, cover_height, c
     if cover then
         local image = ImageWidget:new{ image = cover, image_disposable = false, scale_factor = 1 }
         place(layers, image, featured and width - pad - image_width or pad, pad)
+        self.cover_widgets[#self.cover_widgets + 1] = image
+        self.focus_exclusions[index][#self.focus_exclusions[index] + 1] = image
         if featured then self.cover_widget = image end
     end
-    if self.keyboard then
+    if show_badge then
         local badge = canvas(badge_size, badge_size)
-        local label = text(recent_index and recent_keys[recent_index] or "↵", 13, true, badge_size, badge_size)
+        local label = text(recent_keys[recent_index], 13, true, badge_size, badge_size)
         place(badge, label, math.max(0, math.floor((badge_size - label:getWidth()) / 2)), 0)
         local badge_frame = frame(badge, Blitbuffer.COLOR_WHITE, Size.line.medium)
         place(layers, badge_frame, badge_over_cover and pad or text_x + text_width - badge_size, pad)
+        self.badge_widgets[#self.badge_widgets + 1] = badge_frame
+        self.focus_exclusions[index][#self.focus_exclusions[index] + 1] = badge_frame
     end
     local card = frame(layers)
     self.rows[index] = card
@@ -276,8 +337,8 @@ function Home:buildView()
     local scale = function(n) return Screen:scaleBySize(n) end
     local data, options = self.home_data, self.home_data.options or {}
     self.show_covers, self.show_metadata = options.covers ~= false, options.metadata ~= false
-    self.keyboard = Device:hasKeyboard()
     self.rows, self.focus_frames, self.row_books = {}, {}, {}
+    self.focus_exclusions, self.cover_widgets, self.badge_widgets = {}, {}, {}
     self.recent_indices = {}
     self.cover_bb, self.cover_widget, self.featured_title, self.title_widget = nil, nil, nil, nil
     self.header = Header:new{
@@ -416,15 +477,88 @@ function Home:buildView()
         y = y + unit(22)
         place(body, text(stats, 15, false, width, unit(24)), margin, y)
     end
+    self.body = body
     local view = canvas(self.width, self.height)
     place(view, self.header, 0, 0)
     place(view, body, 0, self.header_height)
     return view
 end
 
+-- One BB8 body plus a header strip; BB4 uses one smaller packed full-screen
+-- buffer including the header, with matching native rotation and inverse.
+-- Native widgets paint at actual screen coordinates on misses. Every paint
+-- restores the surface, including areas exposed by closing overlapping menus.
+function Home:freePaintCache()
+    if self.body_bb then self.body_bb:free(); self.body_bb = nil end
+    if self.header_bb then self.header_bb:free(); self.header_bb = nil end
+    self.header_cached = nil
+end
+
 function Home:paintTo(bb, x, y)
-    bb:paintRect(x, y, self.width, self.height, Blitbuffer.COLOR_WHITE)
-    InputContainer.paintTo(self, bb, x, y)
+    if self.disposed or self.skip_paint then return end
+    local inverse, night = bb:getInverse(), Screen.night_mode
+    local bbtype, rotation = bb:getType(), bb:getRotation()
+    local packed = bbtype == Blitbuffer.TYPE_BB4
+    if self.paint_inverse ~= inverse or self.paint_night ~= night
+            or self.paint_type ~= bbtype or self.paint_rotation ~= rotation
+            or self.paint_x ~= x or self.paint_y ~= y then
+        self:freePaintCache()
+    end
+    self.paint_inverse, self.paint_night = inverse, night
+    self.paint_type, self.paint_rotation = bbtype, rotation
+    self.paint_x, self.paint_y = x, y
+    self.dimen.x, self.dimen.y = x, y
+    local body_y, body_height = y + self.header_height, self.height - self.header_height
+    local body_offset = packed and self.header_height or 0
+    if not self.body_bb then
+        bb:paintRect(x, body_y, self.width, body_height, Blitbuffer.COLOR_WHITE)
+        local selected = self.focus_frames[self.selected]
+        if selected then selected.invert = false end
+        self.body:paintTo(bb, x, body_y)
+        if selected then selected.invert = true end
+        self.body_bb = paintBuffer(self.width, packed and self.height or body_height, bb)
+        copyPaint(self.body_bb, bb, 0, body_offset, x, body_y, self.width, body_height)
+    else
+        copyPaint(bb, self.body_bb, x, body_y, 0, body_offset, self.width, body_height)
+    end
+    local status = self.header.status_widget.text
+    local focused = self.header.menu_button and self.header.menu_button.focused
+    if self.paint_status ~= status or self.paint_header_focus ~= focused then self.header_cached = nil end
+    if not self.header_cached then
+        bb:paintRect(x, y, self.width, self.header_height, Blitbuffer.COLOR_WHITE)
+        self.header:paintTo(bb, x, y)
+        if not packed and not self.header_bb then self.header_bb = paintBuffer(self.width, self.header_height, bb) end
+        copyPaint(packed and self.body_bb or self.header_bb, bb, 0, 0, x, y, self.width, self.header_height)
+        self.paint_status, self.paint_header_focus = status, focused
+        self.header_cached = true
+    else
+        copyPaint(bb, packed and self.body_bb or self.header_bb, x, y, 0, 0, self.width, self.header_height)
+    end
+    local focus = self.focus_frames[self.selected]
+    if focus and focus.dimen then
+        local rect, border = focus.dimen, focus.bordersize
+        invertFocus(bb, rect.x + border, rect.y + border, rect.w - 2 * border, rect.h - 2 * border)
+        -- These layers were painted after the original invertible frame. Restore
+        -- them verbatim instead of inverting covers or recent-key badges.
+        for _, widget in ipairs(self.focus_exclusions[self.selected] or {}) do
+            local area = widget.dimen
+            if area then
+                copyPaint(bb, self.body_bb, area.x, area.y, area.x - x, area.y - body_y + body_offset, area.w, area.h)
+            end
+        end
+    end
+    -- A BB8 snapshot must not desaturate covers on color displays. Only the
+    -- existing (at most four) decoded image buffers are composited in that case.
+    if bb:isRGB() then
+        for _, image in ipairs(self.cover_widgets) do
+            image:paintTo(bb, image.dimen.x, image.dimen.y)
+        end
+        -- These badges are above covers in the native tree as well.
+        for _, badge in ipairs(self.badge_widgets) do
+            local area = badge.dimen
+            copyPaint(bb, self.body_bb, area.x, area.y, area.x - x, area.y - body_y + body_offset, area.w, area.h)
+        end
+    end
 end
 
 function Home:getFocusId()
@@ -523,7 +657,7 @@ end
 
 function Home:onBookMetadataChanged()
     self.controller.home_source_cache = nil
-    LibraryActions.queueRefresh(self)
+    if self.controller.screen == self then LibraryActions.queueRefresh(self) end
 end
 
 function Home:onMinimalMenu()
@@ -597,9 +731,22 @@ local function sameHome(screen, items, book, data)
     return true
 end
 
+function Home:layoutChanged()
+    return self.width ~= Screen:getWidth() or self.height ~= Screen:getHeight()
+        or self.has_keys ~= Device:hasKeys() or self.few_keys ~= Device:hasFewKeys()
+        or self.keyboard ~= Device:hasKeyboard() or self.touch ~= Device:isTouchDevice()
+end
+
 function Home:setContent(items, book, index, home_data)
     LibraryActions.cancelRefresh(self)
-    if home_data and self.home_data.recent and sameHome(self, items, book, home_data) then
+    if self.show_covers then
+        for _, entry in pairs(self.cover_cache or {}) do
+            local signature = Cover.signature(entry.path)
+            if not signature or signature ~= entry.signature then entry.invalid = true end
+        end
+    end
+    if not self:layoutChanged() and home_data and self.home_data.recent
+            and sameHome(self, items, book, home_data) then
         self.item_table, self.book, self.home_data = items, book, home_data
         self.header:refreshStatus()
         self:setSelection(index)
@@ -607,14 +754,17 @@ function Home:setContent(items, book, index, home_data)
     end
     self.item_table, self.book, self.selected = items, book, index
     self.home_data = home_data or {}
-    self:rebuild()
+    self:rebuild(true)
 end
 
-function Home:rebuild()
-    self:free()
+function Home:rebuild(content_changed)
+    if not content_changed and not self:layoutChanged() then return false end
+    self:freePaintCache()
+    self:free(true)
     self[1] = nil
     self:init()
     UIManager:setDirty(self, "ui")
+    return true
 end
 
 function Home:onSetDimensions()
@@ -632,15 +782,37 @@ function Home:onSetRotationMode(rotation)
     return true
 end
 
-function Home:onCloseWidget()
+function Home:dispose()
+    if self.disposed then return end
+    self.disposed = true
     LibraryActions.cancelRefresh(self)
-    self.controller:screenClosed(self)
-    self:free()
+    self:freePaintCache()
+    self:free(true)
+    self[1] = nil
     for _, entry in pairs(self.cover_cache or {}) do
         if entry.bb then entry.bb:free() end
     end
     self.cover_cache = nil
-    self.cover_bb, self.cover_widget = nil, nil
+    self.cover_bb, self.cover_widget, self.title_widget, self.featured_title = nil, nil, nil, nil
+    self.body, self.header = nil, nil
+    self.rows, self.focus_frames, self.row_books = nil, nil, nil
+    self.focus_exclusions, self.cover_widgets, self.badge_widgets = nil, nil, nil
+    self.item_table, self.book, self.home_data = nil, nil, nil
+end
+
+function Home:propagateEvent(event)
+    -- Native text/image children free themselves on CloseWidget. Home owns
+    -- their lifetime while parked and frees the whole subtree only in dispose.
+    if event.handler == "onCloseWidget" then return false end
+    return InputContainer.propagateEvent(self, event)
+end
+
+function Home:onCloseWidget()
+    LibraryActions.cancelRefresh(self)
+    self.controller:screenClosed(self)
+    -- The controller owns one off-stack Home. Native close only parks it;
+    -- teardown clears ownership first, then reaches the idempotent disposer.
+    if self.controller.home_screen ~= self then self:dispose() end
 end
 
 return Home

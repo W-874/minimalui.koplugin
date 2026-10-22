@@ -19,6 +19,26 @@ local VerticalGroup = require("ui/widget/verticalgroup")
 local VerticalSpan = require("ui/widget/verticalspan")
 local Screen = Device.screen
 
+local HeaderButton = IconButton:extend{}
+
+function HeaderButton:onFocus()
+    self.focused = true
+    return true
+end
+
+function HeaderButton:onUnfocus()
+    self.focused = false
+    return true
+end
+
+function HeaderButton:paintTo(bb, x, y)
+    IconButton.paintTo(self, bb, x, y)
+    if self.focused then
+        local inset = Screen:scaleBySize(2)
+        bb:invertRect(x + inset, y + inset, self.dimen.w - 2 * inset, self.dimen.h - 2 * inset)
+    end
+end
+
 local Header = InputContainer:extend{
     width = nil,
     title = "",
@@ -50,10 +70,29 @@ function Header.listBuilder(original)
     end
 end
 
+-- Keep native text intact: callers may need it when restoring the title bar.
+function Header:_resolveText()
+    local title = self.fixed_title or self.native_title or ""
+    if self.folder_title and not self.fixed_title then
+        local folder = self.folder_title():gsub("/+$", ""):match("([^/]+)$") or ""
+        title = "KO/" .. folder
+    elseif self.title_prefix then
+        title = self.title_prefix .. (self.native_title or "")
+    end
+    local subtitle
+    if self.context_callback then
+        subtitle = self.context_callback(self.native_title, self.subtitle)
+    elseif not self.folder_title then
+        subtitle = self.subtitle
+    end
+    return title, subtitle ~= "" and subtitle or nil
+end
+
 function Header:init()
     self.width = self.width or Screen:getWidth()
+    self.native_title = self.native_title or self.title
     if self.page then self.fixed_title = "KO/" .. self.page end
-    self.title = self.fixed_title or self.title
+    self.title, self.context_subtitle = self:_resolveText()
     self.title_widget = TextWidget:new{
         text = self.title,
         face = Font:getFace("cfont", 17),
@@ -70,23 +109,27 @@ function Header:init()
     local icon_size = self.title_widget:getSize().h
     local touch_height = Screen:scaleBySize(G_defaults:readSetting("DGENERIC_ICON_SIZE")) + 2 * Size.padding.default
     local button_padding = math.max(Size.padding.default, math.floor((touch_height - icon_size) / 2))
-    local function button(icon, callback, hold_callback, icon_rotation_angle)
+    local function button(icon, callback, hold_callback, icon_rotation_angle, allow_flash)
         if not icon then return nil end
-        return IconButton:new{
+        return HeaderButton:new{
             icon = icon,
             icon_rotation_angle = icon_rotation_angle or 0,
             width = icon_size,
             height = icon_size,
             padding = button_padding,
+            padding_left = Screen:scaleBySize(12),
+            padding_right = Screen:scaleBySize(12),
             show_parent = self.show_parent,
             callback = callback,
             hold_callback = hold_callback,
+            -- Native callbacks may close and free this button's container.
+            allow_flash = allow_flash == true,
         }
     end
     self.menu_button = button("chevron.up", function()
         if self.menu_callback then return self.menu_callback() end
     end, nil, 180)
-    self.home_button = self.home_callback and button("home", function()
+    self.home_button = self.home_callback and button(self.navigation_icon or "home", function()
         return self.home_callback()
     end, self.home_hold_callback) or nil
     self.left_button = self.home_button
@@ -94,12 +137,12 @@ function Header:init()
     if self.menu_button then table.insert(self.buttons, self.menu_button) end
     if self.home_button then table.insert(self.buttons, self.home_button) end
 
-    local left_items = { HorizontalSpan:new{ width = Screen:scaleBySize(12) } }
+    local left_items = {}
     local right_items = {}
     if self.menu_button then table.insert(left_items, self.menu_button) end
     if self.home_button then table.insert(left_items, self.home_button) end
     for _, extra in ipairs(self.extra_buttons or {}) do
-        local extra_button = button(extra.icon, extra.callback, extra.hold_callback)
+        local extra_button = button(extra.icon, extra.callback, extra.hold_callback, nil, extra.allow_flash)
         if extra_button then
             if extra.role == "left" then
                 table.insert(left_items, extra_button)
@@ -122,8 +165,8 @@ function Header:init()
     self.right_width = self.right_group and self.right_group:getSize().w or 0
 
     self.subtitle_widget = nil
-    if self.subtitle and self.subtitle ~= "" then
-        self.subtitle_widget = self:createSubtitle(self.subtitle)
+    if self.context_subtitle then
+        self.subtitle_widget = self:createSubtitle(self.context_subtitle)
     end
     self:_layout()
 end
@@ -149,90 +192,126 @@ function Header:_layout()
         self.subtitle_height = self.subtitle_widget:getSize().h + Size.padding.small
     end
     self.header_height = self.bar_height + self.subtitle_height
-    self.dimen = Geom:new{ x = 0, y = 0, w = self.width, h = self.header_height }
+    if self.dimen then
+        -- InputContainer:paintTo owns x/y; resizing must retain painted coordinates.
+        self.dimen.w, self.dimen.h = self.width, self.header_height
+    else
+        self.dimen = Geom:new{ x = 0, y = 0, w = self.width, h = self.header_height }
+    end
 
-    local overlay = OverlapGroup:new{ dimen = self.dimen, allow_mirroring = false }
+    if not self[1] then
+        local main = OverlapGroup:new{ allow_mirroring = false }
+        self.title_container = CenterContainer:new{ dimen = Geom:new{}, self.title_widget }
+        main[#main + 1] = self.title_container
+        if self.left_group then
+            self.left_container = LeftContainer:new{ dimen = Geom:new{}, self.left_group }
+            main[#main + 1] = self.left_container
+        end
+        if self.right_group then
+            self.right_container = RightContainer:new{ dimen = Geom:new{}, self.right_group }
+            main[#main + 1] = self.right_container
+        end
+        self.rule = LineWidget:new{
+            overlap_offset = { 0, 0 },
+            dimen = Geom:new{},
+            background = Blitbuffer.COLOR_BLACK,
+        }
+        main[#main + 1] = self.rule
+        self[1] = OverlapGroup:new{ allow_mirroring = false, main }
+    end
+    local overlay, main = self[1], self[1][1]
+    overlay.dimen.w, overlay.dimen.h = self.width, self.header_height
+    overlay._size.w, overlay._size.h = self.width, self.header_height
+    main.dimen.w, main.dimen.h = self.width, self.bar_height
+    main._size.w, main._size.h = self.width, self.bar_height
     local main_height = self.bar_height - Size.line.thick
-    local main = OverlapGroup:new{ dimen = Geom:new{ x = 0, y = 0, w = self.width, h = self.bar_height }, allow_mirroring = false }
-    main[1] = CenterContainer:new{
-        dimen = Geom:new{ x = 0, y = 0, w = self.width, h = main_height },
-        self.title_widget,
-    }
-    if self.left_group then
-        main[2] = LeftContainer:new{
-            dimen = Geom:new{ x = 0, y = 0, w = self.width, h = main_height },
-            self.left_group,
-        }
+    self.title_container.dimen.w, self.title_container.dimen.h = self.width, main_height
+    if self.left_container then
+        self.left_container.dimen.w, self.left_container.dimen.h = self.width, main_height
     end
-    if self.right_group then
-        main[3] = RightContainer:new{
-            dimen = Geom:new{ x = 0, y = 0, w = self.width, h = main_height },
-            self.right_group,
-        }
+    if self.right_container then
+        self.right_container.dimen.w, self.right_container.dimen.h = self.width, main_height
     end
-    main[4] = LineWidget:new{
-        overlap_offset = { 0, main_height },
-        dimen = Geom:new{ x = 0, y = main_height, w = self.width, h = Size.line.thick },
-        background = Blitbuffer.COLOR_BLACK,
-    }
-    overlay[1] = main
+    self.rule.overlap_offset[2] = main_height
+    self.rule.dimen.w, self.rule.dimen.h = self.width, Size.line.thick
     if self.subtitle_widget then
-        overlay[2] = CenterContainer:new{
-            overlap_offset = { 0, self.bar_height },
-            dimen = Geom:new{ x = 0, y = self.bar_height, w = self.width, h = self.subtitle_height },
-            VerticalGroup:new{
-                VerticalSpan:new{ width = Size.padding.small },
-                self.subtitle_widget,
-            },
-        }
+        if not self.subtitle_container then
+            self.subtitle_group = VerticalGroup:new{ VerticalSpan:new{ width = Size.padding.small } }
+            self.subtitle_container = CenterContainer:new{
+                overlap_offset = { 0, 0 },
+                dimen = Geom:new{},
+                self.subtitle_group,
+            }
+        end
+        self.subtitle_group[2] = self.subtitle_widget
+        self.subtitle_group:resetLayout()
+        self.subtitle_container.overlap_offset[2] = self.bar_height
+        self.subtitle_container.dimen.w, self.subtitle_container.dimen.h = self.width, self.subtitle_height
+        overlay[2] = self.subtitle_container
+    else
+        overlay[2] = nil
+        if self.subtitle_group then
+            self.subtitle_group[2] = nil
+            self.subtitle_group:resetLayout()
+        end
     end
-    self[1] = overlay
 end
 
 function Header:getHeight() return self.header_height end
 function Header:getSize() return self.dimen end
+function Header:_refreshText(no_refresh)
+    local title, subtitle = self:_resolveText()
+    local title_changed = self.title ~= title
+    local subtitle_changed = self.context_subtitle ~= subtitle
+    if not title_changed and not subtitle_changed then return end
+    local old_height = self.header_height
+    if title_changed then
+        self.title = title
+        self.title_widget:setText(title)
+    end
+    if subtitle_changed then
+        local had_subtitle = self.subtitle_widget ~= nil
+        self.context_subtitle = subtitle
+        if subtitle then
+            if self.subtitle_widget then
+                self.subtitle_widget:setText(subtitle)
+                self.subtitle_group:resetLayout()
+            else
+                self.subtitle_widget = self:createSubtitle(subtitle)
+            end
+        else
+            self.subtitle_widget:free()
+            self.subtitle_widget = nil
+        end
+        if had_subtitle ~= (self.subtitle_widget ~= nil) then self:_layout() end
+    end
+    if not no_refresh then
+        local region = self.dimen
+        if old_height > self.header_height then
+            region = self.dimen:copy()
+            region.h = old_height
+        end
+        UIManager:setDirty(self.show_parent, "ui", region)
+    end
+end
+
 function Header:setTitle(title, no_refresh)
     self.native_title = title
-    title = self.fixed_title or title
-    if self.title == title then return end
-    self.title = title
-    self.title_widget:setText(title)
-    if not no_refresh then UIManager:setDirty(self.show_parent, "ui", self.dimen) end
+    self:_refreshText(no_refresh)
 end
+
 function Header:setSubTitle(subtitle, no_refresh)
-    if self.subtitle == subtitle then return end
-    if self.folder_title then
-        self.subtitle = subtitle
-        local path = self.folder_title()
-        local folder = path:gsub("/+$", ""):match("([^/]+)$") or "/"
-        if self.title == "KO/" .. folder then return end
-        self.title = "KO/" .. folder
-        self.title_widget:setText(self.title)
-        if not no_refresh then UIManager:setDirty(self.show_parent, "ui", self.dimen) end
-        return
-    end
-    local had_subtitle = self.subtitle_widget ~= nil
-    local has_subtitle = subtitle ~= nil and subtitle ~= ""
     self.subtitle = subtitle
-    if has_subtitle then
-        if self.subtitle_widget then
-            self.subtitle_widget:setText(subtitle)
-        else
-            self.subtitle_widget = self:createSubtitle(subtitle)
-        end
-    else
-        if self.subtitle_widget then self.subtitle_widget:free() end
-        self.subtitle_widget = nil
-    end
-    if had_subtitle ~= has_subtitle then self:_layout() end
-    if not no_refresh then UIManager:setDirty(self.show_parent, "ui", self.dimen) end
+    self:_refreshText(no_refresh)
 end
 function Header:setLeftIcon(icon)
-    if self.left_extra_button then self.left_extra_button:setIcon(icon) end
+    if not self.left_extra_button or self.left_extra_button.icon == icon then return end
+    self.left_extra_button:setIcon(icon)
     UIManager:setDirty(self.show_parent, "ui", self.dimen)
 end
 function Header:setRightIcon(icon)
-    if self.right_button then self.right_button:setIcon(icon) end
+    if not self.right_button or self.right_button.icon == icon then return end
+    self.right_button:setIcon(icon)
     UIManager:setDirty(self.show_parent, "ui", self.dimen)
 end
 function Header:generateVerticalLayout()

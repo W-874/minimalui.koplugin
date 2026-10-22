@@ -6,7 +6,6 @@ local Header = require("minimalui/header")
 local LibraryView = require("minimalui/libraryview")
 local Menu = require("ui/widget/menu")
 local UIManager = require("ui/uimanager")
-local _ = require("gettext")
 local Screen = Device.screen
 
 local MinimalScreen = Menu:extend{
@@ -28,7 +27,12 @@ function MinimalScreen:init()
         home_callback = function() return self.controller:showHome() end,
     }
     LibraryView.apply(self)
+    -- Native init computes per-page dimensions before its first updateItems.
+    -- current selects the correct page without building it a second time.
+    local current = self.item_table.current
+    self.item_table.current = self.itemnumber
     Menu.init(self)
+    self.item_table.current = current
     -- Released Menu versions bind keys inline and never call registerKeyEvents.
     self:bindKeys()
     if Device:isTouchDevice() then
@@ -125,8 +129,8 @@ function MinimalScreen:rebuild(index)
     self.key_events = nil
     self.selected = { x = 1, y = 1 }
     Menu._init(self)
+    self.itemnumber = index
     self:init()
-    self:setItems(self.title, self.item_table, index)
     self.item_table_stack, self.paths = stack, paths
     UIManager:setDirty(self, "ui")
 end

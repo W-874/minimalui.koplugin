@@ -28,7 +28,6 @@ local function extract(file)
     if not closed then logger.warn("minimalui cover: close failed", file, close_err) end
 
     if not ok then
-        freeBB(bb)
         return nil, tostring(bb)
     end
     if not bb then return nil, "no cover" end

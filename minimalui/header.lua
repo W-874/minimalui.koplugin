@@ -14,6 +14,7 @@ local OverlapGroup = require("ui/widget/overlapgroup")
 local RightContainer = require("ui/widget/container/rightcontainer")
 local Size = require("ui/size")
 local TextWidget = require("ui/widget/textwidget")
+local UIManager = require("ui/uimanager")
 local VerticalGroup = require("ui/widget/verticalgroup")
 local VerticalSpan = require("ui/widget/verticalspan")
 local Screen = Device.screen
@@ -25,14 +26,11 @@ local Header = InputContainer:extend{
     page = nil,
     show_parent = nil,
     subtitle = nil,
-    subtitle_truncate_left = false,
 }
 
 local function group(items)
     if #items == 0 then return nil end
-    local children = {}
-    for _, item in ipairs(items) do table.insert(children, item) end
-    return HorizontalGroup:new(children)
+    return HorizontalGroup:new(items)
 end
 
 function Header:init()
@@ -74,8 +72,6 @@ function Header:init()
     self.home_button = self.home_callback and button("home", function()
         return self.home_callback()
     end, self.home_hold_callback) or nil
-    self.dropdown = self.menu_button
-    self.home = self.home_button
     self.left_button = self.home_button
     self.buttons = {}
     if self.menu_button then table.insert(self.buttons, self.menu_button) end
@@ -87,7 +83,7 @@ function Header:init()
     for _, extra in ipairs(self.extra_buttons or {}) do
         local extra_button = button(extra.icon, extra.callback, extra.hold_callback)
         if extra_button then
-            if extra.role == "left" or extra.side == "left" then
+            if extra.role == "left" then
                 table.insert(left_items, extra_button)
                 self.left_extra_button = self.left_extra_button or extra_button
             else
@@ -120,7 +116,6 @@ function Header:createSubtitle(text)
         face = Font:getFace("cfont", 17),
         padding = 0,
         max_width = self.width - 2 * Size.padding.default,
-        truncate_left = self.subtitle_truncate_left,
     }
 end
 
@@ -180,22 +175,26 @@ function Header:getHeight() return self.header_height end
 function Header:getSize() return self.dimen end
 function Header:setTitle(title, no_refresh)
     self.native_title = title
-    self.title = self.fixed_title or title
-    self.title_widget:setText(self.title)
-    if not no_refresh then require("ui/uimanager"):setDirty(self.show_parent, "ui", self.dimen) end
+    title = self.fixed_title or title
+    if self.title == title then return end
+    self.title = title
+    self.title_widget:setText(title)
+    if not no_refresh then UIManager:setDirty(self.show_parent, "ui", self.dimen) end
 end
 function Header:setSubTitle(subtitle, no_refresh)
-    local had_subtitle = self.subtitle_widget ~= nil
-    local has_subtitle = subtitle ~= nil and subtitle ~= ""
+    if self.subtitle == subtitle then return end
     if self.folder_title then
         self.subtitle = subtitle
         local path = self.folder_title()
         local folder = path:gsub("/+$", ""):match("([^/]+)$") or "/"
+        if self.title == "KO/" .. folder then return end
         self.title = "KO/" .. folder
         self.title_widget:setText(self.title)
-        if not no_refresh then require("ui/uimanager"):setDirty(self.show_parent, "ui", self.dimen) end
+        if not no_refresh then UIManager:setDirty(self.show_parent, "ui", self.dimen) end
         return
     end
+    local had_subtitle = self.subtitle_widget ~= nil
+    local has_subtitle = subtitle ~= nil and subtitle ~= ""
     self.subtitle = subtitle
     if has_subtitle then
         if self.subtitle_widget then
@@ -207,22 +206,16 @@ function Header:setSubTitle(subtitle, no_refresh)
         if self.subtitle_widget then self.subtitle_widget:free() end
         self.subtitle_widget = nil
     end
-    if had_subtitle ~= has_subtitle then self:_layout()
-    elseif self.subtitle_widget then self:_layout() end
-    if not no_refresh then require("ui/uimanager"):setDirty(self.show_parent, "ui", self.dimen) end
+    if had_subtitle ~= has_subtitle then self:_layout() end
+    if not no_refresh then UIManager:setDirty(self.show_parent, "ui", self.dimen) end
 end
 function Header:setLeftIcon(icon)
     if self.left_extra_button then self.left_extra_button:setIcon(icon) end
-    require("ui/uimanager"):setDirty(self.show_parent, "ui", self.dimen)
+    UIManager:setDirty(self.show_parent, "ui", self.dimen)
 end
 function Header:setRightIcon(icon)
     if self.right_button then self.right_button:setIcon(icon) end
-    require("ui/uimanager"):setDirty(self.show_parent, "ui", self.dimen)
-end
-function Header:generateHorizontalLayout()
-    local row = {}
-    for _, button in ipairs(self.buttons) do table.insert(row, button) end
-    return #row > 0 and { row } or {}
+    UIManager:setDirty(self.show_parent, "ui", self.dimen)
 end
 function Header:generateVerticalLayout()
     local rows = {}
@@ -241,12 +234,16 @@ function Header:refreshStatus()
             status = status .. "+" .. powerd:getBatterySymbol(powerd:isAuxCharged(), powerd:isAuxCharging(), aux) .. aux .. "%"
         end
     end
+    if self.status_widget.text == status then return end
     self.status_widget:setText(status)
     if self.right_group then
         self.right_group:resetLayout()
-        self.right_width = self.right_group:getSize().w
-        self:_layout()
-        require("ui/uimanager"):setDirty(self.show_parent, "ui", self.dimen)
+        local width = self.right_group:getSize().w
+        if width ~= self.right_width then
+            self.right_width = width
+            self:_layout()
+        end
+        UIManager:setDirty(self.show_parent, "ui", self.dimen)
     end
 end
 

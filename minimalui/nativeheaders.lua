@@ -58,8 +58,6 @@ function NativeHeaders:adapt(widget, page, is_browser)
         extra_buttons = extra,
     }
     header.native_title = old.title_widget and old.title_widget.text or old.title or widget.title
-    -- Native FM anchors its folder menu to title_bar.left_button.image.dimen.
-    if is_browser then header.left_button = header.home_button end
     local record = {
         widget = widget, old = old, header = header, custom = widget.custom_title_bar,
         is_browser = is_browser,

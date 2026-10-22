@@ -36,7 +36,6 @@ local function text(value, size, bold, width)
     }
 end
 
-
 function Home:init()
     self.width, self.height = Screen:getWidth(), Screen:getHeight()
     self.dimen = Geom:new{ x = 0, y = 0, w = self.width, h = self.height }
@@ -80,7 +79,6 @@ function Home:buildView()
         menu_callback = function() return self:onMinimalMenu() end,
     }
     self.header_height = self.header:getHeight()
-    self.bar_height = self.header.bar_height
 
     local label = text("CONTINUE READING", 16)
     local percent = self.book and text(self.book.fraction
@@ -134,7 +132,6 @@ function Home:buildView()
         invert = self.book ~= nil and self.selected == 1,
         self.title_widget,
     }
-    self.continue_label = label
     local text_column = VerticalGroup:new{
         align = "left", label, VerticalSpan:new{ width = title_gap }, title_frame,
     }
@@ -295,7 +292,6 @@ function Home:onSetRotationMode(rotation)
     end
     return true
 end
-
 
 function Home:onCloseWidget()
     self.controller:screenClosed(self)

@@ -19,6 +19,8 @@ local settings = {
     "flash_ui_cover_images",
 }
 local global_settings = { "items_per_page", "items_font_size" }
+local compared_fields = { "browser", "manager", "source", "mode", "covermenu", "renderer" }
+local setting_groups = { settings, global_settings }
 
 local function state(screen)
     local browser = screen.controller.ui.coverbrowser
@@ -40,9 +42,14 @@ local function state(screen)
     current.renderer = require(modes[mode])
     -- Native cover items require a real path, even for their collection marks.
     -- Keep our nonselectable empty-page explanation in the native classic list.
-    for _, item in ipairs(screen.item_table or {}) do
-        if not (item.file or item.path) then return current end
+    local items = screen.item_table or {}
+    if screen._library_items ~= items then
+        screen._library_items, screen._library_has_paths = items, true
+        for _, item in ipairs(items) do
+            if not (item.file or item.path) then screen._library_has_paths = false; break end
+        end
     end
+    if not screen._library_has_paths then return current end
     current.mode = mode
     return current
 end
@@ -50,10 +57,10 @@ end
 function LibraryView.changed(screen)
     local previous, current = screen._library_display, state(screen)
     if not previous then return true end
-    for _, key in ipairs({ "browser", "manager", "source", "mode", "covermenu", "renderer" }) do
+    for _, key in ipairs(compared_fields) do
         if previous[key] ~= current[key] then return true end
     end
-    for _, keys in ipairs({ settings, global_settings }) do
+    for _, keys in ipairs(setting_groups) do
         for _, key in ipairs(keys) do
             if previous[key] ~= current[key] then return true end
         end

@@ -10,7 +10,6 @@ local NativeHeaders = require("minimalui/nativeheaders")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local filemanagerutil = require("apps/filemanager/filemanagerutil")
-local lfs = require("libs/libkoreader-lfs")
 local _ = require("gettext")
 
 local ENABLED_KEY = "minimalui_enabled"
@@ -28,6 +27,11 @@ end
 function MinimalUI:isLive()
     return not self.closed and not self.ui.tearing_down
         and FileManager.instance == self.ui and UIManager:isWidgetShown(self.ui)
+end
+
+function MinimalUI:canShowView()
+    return self:isEnabled() and self:isLive()
+        and (not self.screen or UIManager:getTopmostVisibleWidget() == self.screen)
 end
 
 function MinimalUI:init()
@@ -58,9 +62,8 @@ function MinimalUI:rememberFocus()
 end
 
 function MinimalUI:showView(view, title, items, book)
-    if not self:isEnabled() or not self:isLive() then return true end
+    if not self:canShowView() then return true end
     local old = self.screen
-    if old and UIManager:getTopmostVisibleWidget() ~= old then return true end
     self:rememberFocus()
     local index = 1
     for i, item in ipairs(items) do
@@ -75,12 +78,12 @@ function MinimalUI:showView(view, title, items, book)
         UIManager:unschedule(self.layout_task)
         self.layout_task = nil
     end
+    self.layout_required = nil
     local screen
     if view == "home" then
         screen = Home:new{ controller = self, item_table = items, book = book, selected = index }
     else
-        screen = MinimalScreen:new{ controller = self, title = title, item_table = items }
-        screen:setItems(title, items, index)
+        screen = MinimalScreen:new{ controller = self, title = title, item_table = items, itemnumber = index }
     end
     self.screen, self.view = screen, view
     UIManager:show(screen)
@@ -89,7 +92,7 @@ function MinimalUI:showView(view, title, items, book)
 end
 
 function MinimalUI:showHome()
-    if not self:isEnabled() or not self:isLive() then return true end
+    if not self:canShowView() then return true end
     local items = {}
     local book = Books.lastBook()
     if book then
@@ -110,7 +113,7 @@ function MinimalUI:showHome()
 end
 
 function MinimalUI:showLibrary()
-    if not self:isEnabled() or not self:isLive() then return true end
+    if not self:canShowView() then return true end
     local books, reason = Books.scan() -- explicit entry only; never on focus/menu/resize
     local items = {}
     if not books or #books == 0 then
@@ -122,8 +125,8 @@ function MinimalUI:showLibrary()
         for _, book in ipairs(books) do
             local path = book.path
             items[#items + 1] = {
-                id = path, path = path, file = path, text = book.title, is_file = true,
-                dim = false, attr = lfs.attributes(path), mandatory = "", callback = function() self:openBook(path) end,
+                id = path, file = path, text = book.title, mandatory = "",
+                callback = function() self:openBook(path) end,
             }
         end
     end
@@ -140,7 +143,7 @@ function MinimalUI:showNativeMenu()
             local on_close = container.onCloseWidget
             container.onCloseWidget = function(widget, ...)
                 if on_close then on_close(widget, ...) end
-                if self.view == "library" then self:queueLayout() end
+                if self.view == "library" then self:queueLayout(true) end
             end
         end
     end
@@ -186,6 +189,7 @@ function MinimalUI:screenClosed(screen)
         UIManager:unschedule(self.layout_task)
         self.layout_task = nil
     end
+    self.layout_required = nil
 end
 
 function MinimalUI:showFileBrowser()
@@ -233,12 +237,17 @@ function MinimalUI:bindBrowserNavigation()
     bind(self.ui, "onHome") -- also handles the native title bar Home button
 end
 
-function MinimalUI:queueLayout()
-    if not self.screen or self.layout_task then return end
+function MinimalUI:queueLayout(display_only)
+    if not self.screen then return end
+    self.layout_required = self.layout_required or not display_only
+    if self.layout_task then return end
     local screen = self.screen
     self.layout_task = function()
-        self.layout_task = nil
-        if self:isLive() and self.screen == screen then screen:rebuild() end
+        local full = self.layout_required
+        self.layout_task, self.layout_required = nil, nil
+        if self:isLive() and self.screen == screen then
+            if full then screen:rebuild() else screen:refreshDisplayMode() end
+        end
     end
     UIManager:nextTick(self.layout_task)
 end

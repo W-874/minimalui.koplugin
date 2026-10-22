@@ -89,7 +89,10 @@ function LibraryView.apply(screen)
     -- patches History/FileChooser classes and invokes their data-source updates.
     screen.nb_cols_portrait = nil
     current.browser.initGrid(screen, current.mode)
-    screen.updateItems = current.covermenu.updateItems
+    screen.updateItems = function(target, ...)
+        current.covermenu.updateItems(target, ...)
+        target:mergeTitleBarIntoLayout()
+    end
     screen._recalculateDimen = current.renderer._recalculateDimen
     screen._updateItemsBuildUI = Header.listBuilder(current.renderer._updateItemsBuildUI)
     screen.getBookInfo = require("ui/widget/booklist").getBookInfo

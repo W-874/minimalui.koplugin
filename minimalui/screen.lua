@@ -6,6 +6,7 @@ local Header = require("minimalui/header")
 local LibraryActions = require("minimalui/libraryactions")
 local LibraryView = require("minimalui/libraryview")
 local Menu = require("ui/widget/menu")
+local NativeHeaders = require("minimalui/nativeheaders")
 local UIManager = require("ui/uimanager")
 local Screen = Device.screen
 
@@ -17,9 +18,11 @@ local MinimalScreen = Menu:extend{
     stop_events_propagation = true, -- only this screen's unhandled gestures
 }
 
+MinimalScreen.mergeTitleBarIntoLayout = NativeHeaders.mergeTitleBarIntoLayout
+
 function MinimalScreen:init()
     self.width, self.height = Screen:getWidth(), Screen:getHeight()
-    self.is_enable_shortcut = Device:hasKeyboard()
+    self.is_enable_shortcut = false -- identical rows on touch and keyboard devices
     self.custom_title_bar = Header:new{
         width = self.width,
         page = "LIBRARY",

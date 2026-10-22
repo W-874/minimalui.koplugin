@@ -80,7 +80,7 @@ function Home:buildView()
     }
     self.header_height = self.header:getHeight()
 
-    local label = text("CONTINUE READING", 16)
+    local label = text(_("Continue reading"), 16)
     local percent = self.book and text(self.book.fraction
         and string.format("%d%%", math.floor(self.book.fraction * 100 + 0.5))
         or _("Progress unavailable"), 16, false, width)

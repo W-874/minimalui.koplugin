@@ -7,6 +7,7 @@ local Home = require("minimalui/home")
 local InfoMessage = require("ui/widget/infomessage")
 local MinimalScreen = require("minimalui/screen")
 local NativeHeaders = require("minimalui/nativeheaders")
+local ReaderBridge = require("minimalui/readerbridge")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local filemanagerutil = require("apps/filemanager/filemanagerutil")
@@ -34,13 +35,19 @@ function MinimalUI:canShowView()
         and (not self.screen or UIManager:getTopmostVisibleWidget() == self.screen)
 end
 
+
 function MinimalUI:init()
-    if self.ui.document then return end
     self.closed = false
+    if self.ui.document then
+        self.reader_bridge = ReaderBridge:new{ controller = self }
+        if self:isEnabled() then self.reader_bridge:install() end
+        return
+    end
     self.focus = {}
     self.native_headers = NativeHeaders:new{ controller = self }
     self.ui.menu:registerToMainMenu(self)
     self.ui:registerPostInitCallback(function()
+        local destination = ReaderBridge.takeDestination()
         self.start_task = function()
             self.start_task = nil
             if self:isEnabled() then self.native_headers:apply() end
@@ -48,7 +55,7 @@ function MinimalUI:init()
             -- startup dialogs or revive a FileManager already closed for reading.
             if self:isEnabled() and self:isLive()
                     and UIManager:getTopmostVisibleWidget() == self.ui then
-                self:showHome()
+                if destination == "library" then self:showLibrary() else self:showHome() end
             end
         end
         UIManager:nextTick(self.start_task)
@@ -267,6 +274,7 @@ end
 
 function MinimalUI:onCloseWidget()
     self.closed = true
+    if self.reader_bridge then self.reader_bridge:restore() end
     self:restoreBrowserNavigation()
     if self.native_headers then self.native_headers:restore() end
     if self.start_task then

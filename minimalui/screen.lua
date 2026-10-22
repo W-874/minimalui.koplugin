@@ -3,6 +3,7 @@ local Device = require("device")
 local Geom = require("ui/geometry")
 local GestureRange = require("ui/gesturerange")
 local Header = require("minimalui/header")
+local LibraryActions = require("minimalui/libraryactions")
 local LibraryView = require("minimalui/libraryview")
 local Menu = require("ui/widget/menu")
 local UIManager = require("ui/uimanager")
@@ -67,6 +68,16 @@ function MinimalScreen:onMenuSelect(item)
     -- Menu normally closes itself after callbacks; these rows are navigation.
     if item.select_enabled ~= false and item.callback then item.callback() end
     return true -- the activation must never reach the screen below
+end
+
+function MinimalScreen:onMenuHold(item)
+    -- Classic Menu and native CoverBrowser items both dispatch this method.
+    return LibraryActions.show(self, item)
+end
+
+function MinimalScreen:onBookMetadataChanged()
+    -- Native Book information emits this only for actual metadata/review edits.
+    LibraryActions.queueRefresh(self)
 end
 
 function MinimalScreen:onHome()
@@ -165,6 +176,7 @@ function MinimalScreen:onPhysicalKeyboardDisconnected()
 end
 
 function MinimalScreen:onCloseWidget()
+    LibraryActions.cancelRefresh(self)
     self.controller:screenClosed(self)
     if not LibraryView.release(self) then Menu.onCloseWidget(self) end
     self:free()

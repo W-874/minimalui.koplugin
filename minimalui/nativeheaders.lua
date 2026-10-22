@@ -156,7 +156,8 @@ function NativeHeaders:adapt(widget, page, is_browser, show_context, opds_browse
     end
     local header = Header:new{
         width = widget.dimen.w, title = "KO/" .. page,
-        page = not is_browser and page or nil,
+        page = not is_browser and not opds_browser and page or nil,
+        title_prefix = opds_browser and "KO/" or nil,
         native_title = old.title_widget and old.title_widget.text or old.title or widget.title,
         subtitle = old.subtitle_widget and old.subtitle_widget.text or old.subtitle,
         context_callback = is_browser and function()
@@ -164,7 +165,7 @@ function NativeHeaders:adapt(widget, page, is_browser, show_context, opds_browse
             local count = 0
             for _ in pairs(ui.selected_files) do count = count + 1 end
             return T(_("Selected: %1"), count)
-        end or show_context and context or nil,
+        end or (not opds_browser and show_context) and context or nil,
         folder_title = is_browser and function() return ui.file_chooser.path end or nil,
         show_parent = is_browser and ui or widget,
         menu_callback = function() return controller:showNativeMenu() end,
@@ -216,12 +217,12 @@ function NativeHeaders:adapt(widget, page, is_browser, show_context, opds_browse
             self:watch(widget, "showFacetLinkList", "OPDS", nil, true, true, record.hooks)
         end
     end
-    -- Initial policy; corrected for native OPDS keyboard hints in the next stage.
-    widget.is_enable_shortcut = false
+    -- OPDS retains native hardware-keyboard shortcuts and their visible labels.
+    if not opds_browser then widget.is_enable_shortcut = false end
     local keys = {}
     for name, binding in pairs(widget.key_events or {}) do keys[name] = binding end
     keys.LeftButtonTap = nil
-    keys.SelectByShortCut = nil
+    if not opds_browser then keys.SelectByShortCut = nil end
     keys.MinimalNativeMenu = { { "Menu" } }
     widget.key_events, record.keys = keys, keys
     self:hook(record.hooks, widget, "onMinimalNativeMenu", function(owner)
@@ -235,7 +236,7 @@ function NativeHeaders:adapt(widget, page, is_browser, show_context, opds_browse
         self:hook(record.hooks, widget, "registerKeyEvents", function(_, fallback, target, ...)
             if fallback then fallback(target, ...) end
             target.key_events.LeftButtonTap = nil
-            target.key_events.SelectByShortCut = nil
+            if not opds_browser then target.key_events.SelectByShortCut = nil end
             target.key_events.MinimalNativeMenu = { { "Menu" } }
             record.keys = target.key_events
         end)

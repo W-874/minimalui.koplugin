@@ -1,0 +1,8 @@
+/docs/
+/tests/
+/v0.*/
+/artifacts/
+/verification.json
+*.zip
+*.log
+.DS_Store

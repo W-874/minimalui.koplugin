@@ -16,16 +16,21 @@ function LibraryActions.cancelRefresh(screen)
         UIManager:unschedule(screen._library_refresh_task)
         screen._library_refresh_task = nil
     end
+    screen._library_refresh_full = nil
     clearWaiter(screen)
 end
 
-function LibraryActions.queueRefresh(screen)
+function LibraryActions.queueRefresh(screen, metadata_only)
+    -- A later metadata event must never downgrade a pending membership scan,
+    -- including while waiting for a native confirmation/editor to close.
+    screen._library_refresh_full = screen._library_refresh_full or not metadata_only
     if screen._library_refresh_task then return end
     screen._library_refresh_task = function()
         screen._library_refresh_task = nil
         local controller = screen.controller
         if controller.screen ~= screen or not controller:canShowView() then
             if controller.screen ~= screen or not controller:isLive() then
+                screen._library_refresh_full = nil
                 clearWaiter(screen)
                 return
             end
@@ -41,21 +46,25 @@ function LibraryActions.queueRefresh(screen)
             waiter.handler = function(closed_widget, ...)
                 clearWaiter(screen)
                 if on_close then on_close(closed_widget, ...) end
-                LibraryActions.queueRefresh(screen)
+                LibraryActions.queueRefresh(screen, true)
             end
             screen._library_refresh_waiter = waiter
             widget.onCloseWidget = waiter.handler
             return
         end
         clearWaiter(screen)
+        local full_scan = screen._library_refresh_full
+        screen._library_refresh_full = nil
         -- Native confirmations call success callbacks BEFORE removing their
         -- own window. Only this deferred, uncovered path may scan/rebuild.
         if controller.view == "home" then
             -- Explicit native actions may rewrite same-size sidecars in one second.
             controller.home_source_cache = nil
             controller:showHome()
-        else
+        elseif full_scan then
             controller:showLibrary()
+        else
+            screen:refreshMetadata()
         end
     end
     UIManager:nextTick(screen._library_refresh_task)
@@ -106,18 +115,22 @@ function LibraryActions.show(screen, item)
         if dialog and UIManager:isWidgetShown(dialog) then UIManager:close(dialog) end
     end
     local function refresh()
-        LibraryActions.queueRefresh(screen)
+        LibraryActions.queueRefresh(screen, true)
     end
     local function closeAndRefresh()
         closeDialog()
         refresh()
+    end
+    local function closeAndRescan()
+        closeDialog()
+        LibraryActions.queueRefresh(screen)
     end
 
     local buttons = {
         filemanagerutil.genStatusButtonsRow(doc_settings_or_file, closeAndRefresh),
         {},
         {
-            filemanagerutil.genResetSettingsButton(doc_settings_or_file, closeAndRefresh, is_currently_opened),
+            filemanagerutil.genResetSettingsButton(doc_settings_or_file, closeAndRescan, is_currently_opened),
             ui.collections:genAddToCollectionButton(file, closeDialog, refresh),
         },
         {
@@ -129,7 +142,7 @@ function LibraryActions.show(screen, item)
                     -- preserves it; only successful deletion closes/refreshes.
                     FileManager.showDeleteFileDialog(ui, file, function()
                         screen.controller.library_count = nil
-                        closeAndRefresh()
+                        closeAndRescan()
                     end)
                 end,
             },

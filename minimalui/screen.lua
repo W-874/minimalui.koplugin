@@ -80,7 +80,7 @@ end
 
 function MinimalScreen:onBookMetadataChanged()
     -- Native Book information emits this only for actual metadata/review edits.
-    LibraryActions.queueRefresh(self)
+    LibraryActions.queueRefresh(self, true)
 end
 
 function MinimalScreen:onHome()
@@ -123,6 +123,12 @@ function MinimalScreen:setItems(title, items, index)
         return
     end
     self:switchItemTable(title, items, self.itemnumber)
+end
+
+function MinimalScreen:refreshMetadata()
+    -- Recreate visible native rows to reread status, collections and book info.
+    -- Membership, filename order and the current selection stay unchanged.
+    self:setItems(self.title, self.item_table, self:focusIndex())
 end
 
 function MinimalScreen:refreshDisplayMode()

@@ -10,6 +10,7 @@ local MinimalScreen = require("minimalui/screen")
 local NativeHeaders = require("minimalui/nativeheaders")
 local ReaderBridge = require("minimalui/readerbridge")
 local UIManager = require("ui/uimanager")
+local ViewSettings = require("minimalui/viewsettings")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local filemanagerutil = require("apps/filemanager/filemanagerutil")
 local _ = require("gettext")
@@ -60,10 +61,12 @@ function MinimalUI:init()
     self.startup_pending = true
     self:bindMetadataEvents()
     self.native_headers = NativeHeaders:new{ controller = self }
+    if self:isEnabled() then ViewSettings.install(self) end
     self.ui.menu:registerToMainMenu(self)
     self.ui:registerPostInitCallback(function()
         local destination = ReaderBridge.takeDestination()
         self.start_task = function()
+            if self:isEnabled() then ViewSettings.install(self) end
             self.start_task = nil
             self.startup_pending = nil
             if self:isEnabled() then
@@ -232,6 +235,7 @@ end
 
 function MinimalUI:showNativeMenu()
     if not self:isLive() then return true end
+    ViewSettings.updateMenu(self)
     local menu = self.ui.menu
     if not (menu.menu_container and UIManager:isWidgetShown(menu.menu_container)) then
         menu:onShowMenu()
@@ -240,7 +244,7 @@ function MinimalUI:showNativeMenu()
             local on_close = container.onCloseWidget
             container.onCloseWidget = function(widget, ...)
                 if on_close then on_close(widget, ...) end
-                if self.view == "library" then self:queueLayout(true) end
+                ViewSettings.refreshViews(self)
             end
         end
     end
@@ -407,6 +411,7 @@ function MinimalUI:onCloseWidget()
     self:restoreBrowserNavigation()
     self:restoreMetadataEvents()
     if self.native_headers then self.native_headers:restore() end
+    ViewSettings.restore(self)
     if self.start_task then
         UIManager:unschedule(self.start_task)
         self.start_task = nil
@@ -462,6 +467,7 @@ MinimalUI.onCloseDocument = MinimalUI.onSaveSettings
 
 function MinimalUI:addToMainMenu(menu_items)
     if self.closed then return end
+    if self:isEnabled() and not self.ui.document then ViewSettings.install(self) end
     menu_items.minimalui_folder_actions = {
         text = _("Current folder actions"),
         sorting_hint = "filemanager_settings",
@@ -492,6 +498,7 @@ function MinimalUI:addToMainMenu(menu_items)
                     G_reader_settings:saveSetting(ENABLED_KEY, enabled)
                     self.ui.menu:onCloseFileManagerMenu()
                     if enabled then
+                        ViewSettings.install(self)
                         self:bindBrowserNavigation()
                         self:bindMetadataEvents()
                         -- Keep existing native content/dialogs on top. Only
@@ -501,6 +508,7 @@ function MinimalUI:addToMainMenu(menu_items)
                         self:startClock()
                         if open_home then self:showHome() end
                     else
+                        ViewSettings.restore(self)
                         self:stopClock()
                         self:restoreBrowserNavigation()
                         self.native_headers:restore()

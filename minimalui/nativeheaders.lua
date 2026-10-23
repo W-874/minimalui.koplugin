@@ -425,11 +425,20 @@ function NativeHeaders:prune()
     end
 end
 
-function NativeHeaders:apply()
+function NativeHeaders:ensureFiles()
     local ui = self.controller.ui
     if not ui then return end
     self:prune()
     self:adapt(ui.file_chooser, "FILES", true)
+end
+
+function NativeHeaders:apply(include_files)
+    local ui = self.controller.ui
+    if not ui then return end
+    self:prune()
+    -- Watchers remain live while Home/Library covers the native FileChooser.
+    -- Only its header/row adaptation waits until Files is about to be exposed.
+    if include_files ~= false then self:adapt(ui.file_chooser, "FILES", true) end
     self:watch(ui.history, "onShowHist", "HISTORY", "booklist_menu")
     self:watch(ui.opds, "onShowOPDSCatalog", "OPDS", "opds_browser", true)
     local opds_browser = ui.opds and ui.opds.opds_browser

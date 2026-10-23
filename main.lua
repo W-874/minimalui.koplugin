@@ -55,6 +55,9 @@ function MinimalUI:init()
         return
     end
     self.focus = {}
+    -- FileManager broadcasts SetDimensions before post-init and before its
+    -- first show. A nil screen there still means our startup view is pending.
+    self.startup_pending = true
     self:bindMetadataEvents()
     self.native_headers = NativeHeaders:new{ controller = self }
     self.ui.menu:registerToMainMenu(self)
@@ -62,8 +65,9 @@ function MinimalUI:init()
         local destination = ReaderBridge.takeDestination()
         self.start_task = function()
             self.start_task = nil
+            self.startup_pending = nil
             if self:isEnabled() then
-                self.native_headers:apply()
+                self.native_headers:apply(false)
                 self:startClock()
             end
             -- Post-init precedes UIManager:show(FileManager). Do not cover
@@ -71,6 +75,11 @@ function MinimalUI:init()
             if self:isEnabled() and self:isLive()
                     and UIManager:getTopmostVisibleWidget() == self.ui then
                 if destination == "library" then self:showLibrary() else self:showHome() end
+            end
+            -- A startup dialog may keep Home from opening. Adapt the browser
+            -- beneath it now so dismissing that dialog cannot expose native UI.
+            if self:isEnabled() and self:isLive() and not self.screen then
+                self.native_headers:ensureFiles()
             end
         end
         UIManager:nextTick(self.start_task)
@@ -303,6 +312,7 @@ function MinimalUI:showFileBrowser()
     self.library_count = nil -- native file operations may change Library contents
     self:rememberFocus()
     self:bindBrowserNavigation()
+    self.native_headers:ensureFiles()
     self:closeScreen()
     return true
 end
@@ -378,7 +388,9 @@ end
 -- FM reinit replaces FileChooser and directs dimensions to its own children.
 function MinimalUI:onSetDimensions()
     self:bindBrowserNavigation()
-    if self.native_headers and self:isEnabled() then self.native_headers:apply() end
+    if self.native_headers and self:isEnabled() then
+        self.native_headers:apply(not self.startup_pending and not self.screen)
+    end
     self:queueLayout()
 end
 
@@ -482,9 +494,12 @@ function MinimalUI:addToMainMenu(menu_items)
                     if enabled then
                         self:bindBrowserNavigation()
                         self:bindMetadataEvents()
-                        self.native_headers:apply()
+                        -- Keep existing native content/dialogs on top. Only
+                        -- defer Files when we can cover it with Home immediately.
+                        local open_home = self:isLive() and UIManager:getTopmostVisibleWidget() == self.ui
+                        self.native_headers:apply(not open_home)
                         self:startClock()
-                        if UIManager:getTopmostVisibleWidget() == self.ui then self:showHome() end
+                        if open_home then self:showHome() end
                     else
                         self:stopClock()
                         self:restoreBrowserNavigation()

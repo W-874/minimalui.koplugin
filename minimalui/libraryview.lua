@@ -1,5 +1,5 @@
-local Header = require("minimalui/header")
 local Menu = require("ui/widget/menu")
+local ViewSettings = require("minimalui/viewsettings")
 
 -- Borrow only the renderer methods from the active native plugin. Never load
 -- CoverBrowser (or its settings database) on behalf of a disabled plugin.
@@ -12,14 +12,14 @@ local modes = {
     list_image_filename = "listmenu",
 }
 local settings = {
-    "unified_display_mode", "filemanager_display_mode", "history_display_mode",
+    "history_display_mode",
     "nb_cols_portrait", "nb_rows_portrait", "nb_cols_landscape", "nb_rows_landscape",
     "files_per_page", "history_hint_opened", "series_mode", "fixed_item_font_size",
-    "hide_file_info", "hide_page_info", "show_pages_read_as_progress",
-    "show_pages_left_in_progress", "show_progress_in_mosaic", "no_hint_description",
+    "hide_page_info", "show_pages_read_as_progress",
+    "show_pages_left_in_progress", "show_progress_in_mosaic",
     "flash_ui_cover_images",
 }
-local global_settings = { "items_per_page", "items_font_size" }
+local global_settings = { "items_per_page", "items_font_size", "minimalui_list_shrink_enabled", "items_multilines_show_more_text" }
 local compared_fields = { "browser", "manager", "source", "mode", "covermenu", "renderer" }
 local setting_groups = { settings, global_settings }
 
@@ -34,8 +34,8 @@ local function state(screen)
     for _, key in ipairs(settings) do
         current[key] = manager:getSetting(key)
     end
-    current.source = current.unified_display_mode and "filemanager" or "history"
-    local mode = current[current.source .. "_display_mode"]
+    current.source = "history"
+    local mode = ViewSettings.effectiveMode(screen.controller.ui, "books")
     if not modes[mode] then return current end
     -- CoverBrowser loads BookList renderers lazily on first display, not when
     -- selecting the History preference. Only the enabled plugin reaches here.
@@ -83,33 +83,39 @@ function LibraryView.apply(screen)
     screen.display_mode_type = nil
     screen.getBookInfo = nil
     screen._covermenu_onclose_done = nil
-    if not current.mode then return end
+    local ViewRender = require("minimalui/viewrender")
+    if not current.mode then
+        ViewSettings.configure(screen, screen.controller.ui, { kind = "books", page = "LIBRARY", force_classic = true })
+        screen._updateItemsBuildUI = function(target) return ViewRender.build(target) end
+        screen.updateItems = ViewRender.updateClassic
+        ViewRender.attach(screen, { kind = "books", page = "LIBRARY" })
+        return
+    end
 
     -- initGrid is a static native helper, not setupWidgetDisplayMode: the latter
     -- patches History/FileChooser classes and invokes their data-source updates.
-    screen.nb_cols_portrait = nil
-    current.browser.initGrid(screen, current.mode)
+    local configured = ViewSettings.configure(screen, screen.controller.ui, { kind = "books", page = "LIBRARY" })
     screen.updateItems = function(target, ...)
-        current.covermenu.updateItems(target, ...)
+        require("minimalui/viewfocus").invalidate(target)
+        ViewRender.updateCover(target, ...)
         target:mergeTitleBarIntoLayout()
     end
-    screen._recalculateDimen = current.renderer._recalculateDimen
-    screen._updateItemsBuildUI = Header.listBuilder(current.renderer._updateItemsBuildUI)
-    screen.getBookInfo = require("ui/widget/booklist").getBookInfo
-    screen._do_cover_images = current.mode ~= "mosaic_text" and current.mode ~= "list_only_meta"
-    screen._do_filename_only = current.mode == "list_image_filename"
-    screen._do_center_partial_rows = true
-    screen._do_hint_opened = current.source == "filemanager" or current.history_hint_opened
+    screen._recalculateDimen = configured.renderer._recalculateDimen
+    screen._updateItemsBuildUI = function(target) return ViewRender.build(target) end
     screen._library_covermenu = current.covermenu
+    ViewRender.attach(screen, { kind = "books", page = "LIBRARY" })
 end
 
 function LibraryView.remember(screen)
+    require("minimalui/viewrender").attach(screen, { kind = "books", page = "LIBRARY" })
     -- Native ListMenu may have just initialized its shared files_per_page setting.
     screen._library_display = state(screen)
 end
 
 function LibraryView.release(screen)
+    require("minimalui/viewrender").release(screen)
     local covermenu = screen._library_covermenu
+    ViewSettings.release(screen)
     if not covermenu then return false end
     screen._library_covermenu = nil
     -- Use the original renderer even if ui.coverbrowser has since disappeared.

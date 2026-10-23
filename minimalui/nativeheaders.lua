@@ -3,6 +3,10 @@ local FocusManager = require("ui/widget/focusmanager")
 local GestureRange = require("ui/gesturerange")
 local Header = require("minimalui/header")
 local UIManager = require("ui/uimanager")
+local ViewSettings = require("minimalui/viewsettings")
+local ViewRender = require("minimalui/viewrender")
+local ViewFooter = require("minimalui/viewfooter")
+local ViewFocus = require("minimalui/viewfocus")
 local Size = require("ui/size")
 local _ = require("gettext")
 local T = require("ffi/util").template
@@ -186,7 +190,11 @@ function NativeHeaders:adapt(widget, page, is_browser, show_context, opds_browse
     }
     local record = {
         widget = widget, old = old, header = header, custom = widget.custom_title_bar,
-        is_browser = is_browser, hooks = {}, shortcut = rawget(widget, "is_enable_shortcut"),
+        is_browser = is_browser,
+        view_options = (is_browser or page == "HISTORY" or page == "SEARCH"
+            or (page == "COLLECTIONS" and ui.collections and widget == ui.collections.booklist_menu))
+            and { kind = is_browser and "files" or "books", page = page } or nil,
+        hooks = {}, shortcut = rawget(widget, "is_enable_shortcut"),
         build_ui = rawget(widget, "_updateItemsBuildUI"),
         key_events = widget.key_events, ges_events = widget.ges_events,
     }
@@ -264,7 +272,14 @@ function NativeHeaders:adapt(widget, page, is_browser, show_context, opds_browse
         if fallback then return fallback(target, arg, ges) end
     end)
     if widget.item_group and widget.updateItems then
-        record.builder = Header.listBuilder(record.build_ui)
+        if record.view_options then
+            ViewSettings.configure(widget, ui, record.view_options)
+            record.builder = ViewRender.build
+            ViewRender.attach(widget, record.view_options)
+        else
+            record.builder = Header.listBuilder(record.build_ui)
+            ViewFooter.apply(widget)
+        end
         widget._updateItemsBuildUI = record.builder
         -- Native Sym/ScreenKB devices skip titlebar focus because Menu used to
         -- activate the left icon. Menu now means Settings, so expose every icon.
@@ -275,7 +290,8 @@ function NativeHeaders:adapt(widget, page, is_browser, show_context, opds_browse
             -- Native treats itemnumber as a one-shot visible-focus request.
             -- Set it only after the renderer chose its row, so neither paging
             -- nor native selection restoration is redirected to the first book.
-            if not target.itemnumber and #target.item_table > 0 then target.itemnumber = 1 end
+            if not target.itemnumber and #target.item_table > 0
+                    and Device:hasDPad() and not Device:isTouchDevice() then target.itemnumber = 1 end
             return fallback(target, ...)
         end)
         local own_update = rawget(widget, "updateItems")
@@ -287,7 +303,16 @@ function NativeHeaders:adapt(widget, page, is_browser, show_context, opds_browse
                 -- CoverBrowser switches FileChooser's class method in place.
                 fallback = own_update or getmetatable(target).updateItems
             end
+            if record.view_options then
+                local previous = target._minimalui_view
+                local state = ViewSettings.configure(target, ui, record.view_options)
+                if not previous or previous.mode ~= state.mode then no_recalculate_dimen = false end
+                target._updateItemsBuildUI = record.builder
+                ViewFocus.invalidate(target)
+                fallback = state.mode and ViewRender.updateCover or ViewRender.updateClassic
+            end
             local result = pack(fallback(target, selected, no_recalculate_dimen))
+            ViewFooter.apply(target)
             NativeHeaders.mergeTitleBarIntoLayout(target)
             return unpack(result, 1, result.n)
         end)
@@ -307,7 +332,9 @@ function NativeHeaders:adapt(widget, page, is_browser, show_context, opds_browse
         layoutDetails(widget, header)
     end
     self:hook(record.hooks, widget, "onCloseWidget", function(owner, fallback, target, ...)
+        local state = target._minimalui_view
         owner:release(record, false)
+        if state and state.native_close then return state.native_close(target, ...) end
         if fallback then return fallback(target, ...) end
     end)
     if is_browser then
@@ -365,6 +392,22 @@ function NativeHeaders:watch(instance, method, page, field, show_context, scan, 
     end)
 end
 
+-- BookList is constructed empty. Adapt it before its owner first populates
+-- data, so native CoverMenu never queues an unowned extraction closure first.
+function NativeHeaders:watchBookItems(instance, page)
+    if not instance or not instance.updateItemTable then return end
+    for _, h in ipairs(self.creators) do
+        if h.target == instance and h.name == "updateItemTable" then return end
+    end
+    local own = rawget(instance, "updateItemTable")
+    self:hook(self.creators, instance, "updateItemTable", function(owner, fallback, target, ...)
+        owner:adapt(target.booklist_menu, page, false, page == "COLLECTIONS")
+        -- CoverBrowser changes the owner's class method when a setting changes.
+        fallback = own or getmetatable(target).updateItemTable
+        return fallback(target, ...)
+    end)
+end
+
 function NativeHeaders:watchBookmarks()
     local browser = package.loaded["ui/widget/bookmarkbrowser"]
     if type(browser) ~= "table" then return end
@@ -378,6 +421,8 @@ end
 function NativeHeaders:release(record, refresh)
     local widget, header = record.widget, record.header
     restoreHooks(record.hooks)
+    ViewRender.release(widget)
+    ViewSettings.release(widget)
     if widget._minimal_header == record then
         if widget._updateItemsBuildUI == record.builder then widget._updateItemsBuildUI = record.build_ui end
         if widget.is_enable_shortcut == false then widget.is_enable_shortcut = record.shortcut end
@@ -439,6 +484,9 @@ function NativeHeaders:apply(include_files)
     -- Watchers remain live while Home/Library covers the native FileChooser.
     -- Only its header/row adaptation waits until Files is about to be exposed.
     if include_files ~= false then self:adapt(ui.file_chooser, "FILES", true) end
+    self:watchBookItems(ui.history, "HISTORY")
+    self:watchBookItems(ui.collections, "COLLECTIONS")
+    self:watchBookItems(ui.filesearcher, "SEARCH")
     self:watch(ui.history, "onShowHist", "HISTORY", "booklist_menu")
     self:watch(ui.opds, "onShowOPDSCatalog", "OPDS", "opds_browser", true)
     local opds_browser = ui.opds and ui.opds.opds_browser

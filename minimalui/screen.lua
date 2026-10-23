@@ -35,6 +35,9 @@ function MinimalScreen:init()
     -- current selects the correct page without building it a second time.
     local current = self.item_table.current
     self.item_table.current = self.itemnumber
+    -- This index restores the page, not an explicit visible-focus request on
+    -- a pure touch device. Native Menu leaves those rows unhighlighted.
+    if not Device:hasDPad() then self.itemnumber = nil end
     Menu.init(self)
     self.item_table.current = current
     -- Released Menu versions bind keys inline and never call registerKeyEvents.

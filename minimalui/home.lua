@@ -64,6 +64,13 @@ local function copyPaint(dest, source, dx, dy, sx, sy, width, height)
     if dx % 2 ~= sx % 2 then
         return dest:blitFrom(source, logical_dx, logical_dy, logical_sx, logical_sy, logical_width, logical_height)
     end
+    -- Whole packed scanlines are contiguous only without trailing padding or
+    -- a shared last nibble. Partial rows/viewports keep the edge-preserving path.
+    if dx == 0 and sx == 0 and width == dest.w and width == source.w
+            and width % 2 == 0 and dest.stride == width / 2 and source.stride == dest.stride then
+        ffi.copy(dest.data + dy * dest.stride, source.data + sy * source.stride, height * dest.stride)
+        return
+    end
     for row = 0, height - 1 do
         local dp = dest.data + (dy + row) * dest.stride
         local sp = source.data + (sy + row) * source.stride

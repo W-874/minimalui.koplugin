@@ -158,13 +158,18 @@ local function lastRead(book, timestamp, show_metadata)
     end
 end
 
-local function statisticsText(ui)
+local function statisticsText(ui, cache)
+    local StatCache = require("minimalui/statcache")
     local statistics = ui and ui.statistics
     if not (statistics and statistics.settings and statistics.settings.is_enabled == true
-            and type(statistics.getReadingProgressStats) == "function") then return end
+            and type(statistics.getReadingProgressStats) == "function") then
+        StatCache.close(cache)
+        return
+    end
     -- Native getters open the database themselves, so never call them when
     -- it does not already exist (SQLite open could otherwise create it).
-    if not isFile(DataStorage:getSettingsDir() .. "/statistics.sqlite3") then return end
+    local path = DataStorage:getSettingsDir() .. "/statistics.sqlite3"
+    if not isFile(path) then StatCache.close(cache); return end
     local now = os.date("*t")
     local today = os.date("%Y-%m-%d")
     local start_day = statistics.settings.calendar_start_day_of_week
@@ -176,7 +181,7 @@ local function statisticsText(ui)
     local ok, today_seconds, week_seconds = pcall(function()
         -- getDaysFromPeriod returns display text, not durations. An extra
         -- day covers native fixed-86400 boundaries across DST changes.
-        local rows = statistics:getReadingProgressStats(8)
+        local rows = StatCache.get(statistics, path, cache)
         if type(rows) ~= "table" then return end
         local today_total, week_total = 0, 0
         for _, row in ipairs(rows) do
@@ -192,17 +197,18 @@ local function statisticsText(ui)
         return today_total, week_total
     end)
     if not ok then
+        StatCache.close(cache)
         logger.warn("MinimalUI: unable to read Home statistics", today_seconds)
         return
     end
-    if today_seconds == nil then return end
+    if today_seconds == nil then StatCache.close(cache); return end
     return T(_("Today %1 · This week %2"), duration(today_seconds), duration(week_seconds))
 end
 
 -- The controller owns this optional cache and clears it on metadata/save
 -- events, including same-timestamp writes. No history existence checks are
 -- cached; books retains only this collection's featured + three recent items.
-function HomeSource.collect(ui, book, library_count, cache)
+function HomeSource.collect(ui, book, library_count, cache, statistics_cache)
     local opts = options()
     local previous = cache and cache.books
     local current = cache and {}
@@ -242,7 +248,9 @@ function HomeSource.collect(ui, book, library_count, cache)
     end
     if cache then cache.books = current end
     if opts.stats then
-        data.stats_text = statisticsText(ui)
+        data.stats_text = statisticsText(ui, statistics_cache)
+    elseif statistics_cache then
+        require("minimalui/statcache").close(statistics_cache)
     end
     return data
 end

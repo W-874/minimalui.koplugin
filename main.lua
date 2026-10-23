@@ -108,6 +108,7 @@ end
 
 function MinimalUI:onSuspend()
     self:stopClock()
+    self:closeStatistics()
 end
 
 function MinimalUI:onResume()
@@ -169,7 +170,9 @@ function MinimalUI:showHome()
     local path = G_reader_settings:readSetting("lastfile")
     local book = Books.isFile(path) and { path = path, title = (path:match("([^/]+)$") or path):gsub("%.[^.]+$", "") } or nil
     self.home_source_cache = self.home_source_cache or {}
-    local home_data = require("minimalui/homesource").collect(self.ui, book, self.library_count, self.home_source_cache)
+    self.home_statistics_cache = self.home_statistics_cache or {}
+    local home_data = require("minimalui/homesource").collect(self.ui, book, self.library_count,
+        self.home_source_cache, self.home_statistics_cache)
     if book then
         items[#items + 1] = {
             id = "continue",
@@ -267,6 +270,13 @@ function MinimalUI:closeScreen()
     if screen then UIManager:close(screen) end
 end
 
+function MinimalUI:closeStatistics()
+    if self.home_statistics_cache then
+        require("minimalui/statcache").close(self.home_statistics_cache)
+        self.home_statistics_cache = nil
+    end
+end
+
 function MinimalUI:releaseScreens()
     local home, screen = self.home_screen, self.screen
     -- Clear ownership before CloseWidget: an active Home must dispose, not park.
@@ -274,6 +284,7 @@ function MinimalUI:releaseScreens()
     self:closeScreen()
     if home and home ~= screen then home:dispose() end
     self.home_source_cache = nil
+    self:closeStatistics()
     self.library_count = nil -- native file operations can run while Home is disabled
 end
 
@@ -499,6 +510,7 @@ function MinimalUI:addToMainMenu(menu_items)
                             checked_func = function() return G_reader_settings:readSetting(key) ~= false end,
                             callback = function()
                                 G_reader_settings:saveSetting(key, G_reader_settings:readSetting(key) == false)
+                                if option[1] == "stats" then self:closeStatistics() end
                                 self.ui.menu:onCloseFileManagerMenu()
                                 if self.view == "home" then self:showHome() end
                             end,

@@ -2,6 +2,7 @@
 -- In particular, do not require CoverBrowser or open its database when disabled.
 local Menu = require("ui/widget/menu")
 local _ = require("gettext")
+local T = require("ffi/util").template
 
 local ViewSettings = {}
 local renderers = {
@@ -35,11 +36,86 @@ function ViewSettings.shrinkEnabled(manager)
         and G_reader_settings:isTrue("minimalui_list_shrink_enabled") or false
 end
 
-function ViewSettings.configure(menu, ui, options)
+-- One rendered-state contract for native pages and Library. Compare effective
+-- consumers, not raw SQLite values (false is persisted as NULL by the native DB).
+local grid_settings = { "nb_cols_portrait", "nb_rows_portrait", "nb_cols_landscape", "nb_rows_landscape" }
+function ViewSettings.snapshot(ui, options)
     options = options or {}
     local mode, manager, browser = ViewSettings.effectiveMode(ui, options.kind)
     if options.force_classic then mode = nil end
+    local current = { mode = mode, manager = manager, browser = browser }
+    if options.page == "HISTORY" then
+        current.history_datetime_short = G_reader_settings:isTrue("history_datetime_short")
+    end
+    if not mode then
+        current.items_per_page = G_reader_settings:readSetting("items_per_page")
+        current.items_font_size = G_reader_settings:readSetting("items_font_size")
+        current.shrink = G_reader_settings:isTrue("items_multilines_show_more_text")
+        return current
+    end
+    current.covermenu = require("covermenu")
+    current.renderer = require(renderers[mode])
+    current.flash_ui_cover_images = not not manager:getSetting("flash_ui_cover_images")
+    if mode:match("^mosaic") then
+        for _, key in ipairs(grid_settings) do current[key] = manager:getSetting(key) end
+        current.show_progress_in_mosaic = not not manager:getSetting("show_progress_in_mosaic")
+    else
+        current.files_per_page = manager:getSetting("files_per_page")
+        current.shrink = ViewSettings.shrinkEnabled(manager)
+    end
+    if options.kind == "files" then
+        if not mode:match("^mosaic") then current.hide_file_info = not not manager:getSetting("hide_file_info") end
+    else
+        current.series_mode = manager:getSetting("series_mode") or nil
+        if not mode:match("^mosaic") then
+            for _, key in ipairs({ "hide_page_info", "show_pages_read_as_progress", "show_pages_left_in_progress" }) do
+                current[key] = not not manager:getSetting(key)
+            end
+        end
+        if options.page ~= "SEARCH" then
+            current.hint_opened = not not manager:getSetting(options.page == "COLLECTIONS"
+                and "collections_hint_opened" or "history_hint_opened")
+        end
+    end
+    return current
+end
+
+local function snapshotsDiffer(previous, current)
+    if not previous then return true end
+    for key, value in pairs(previous) do if current[key] ~= value then return true end end
+    for key, value in pairs(current) do if previous[key] ~= value then return true end end
+    return false
+end
+
+function ViewSettings.changed(menu, ui, options)
+    local state = menu._minimalui_view
+    local previous = state and state.snapshot
+    if not previous then return true end
+    return snapshotsDiffer(previous, ViewSettings.snapshot(ui, options or state))
+end
+
+-- Acknowledge only what configure handed to the renderer. A later raw update
+-- must not consume a mode/layout change that still needs Library's rebuild.
+function ViewSettings.remember(menu)
+    local state = menu._minimalui_view
+    if not state then return end
+    local current = state.pending_snapshot
+    -- Native ListMenu initializes its shared default during the first draw.
+    if state.snapshot ~= current and current.mode and not current.mode:match("^mosaic") and current.files_per_page == nil then
+        local value = current.manager:getSetting("files_per_page")
+        if value == menu.files_per_page then current.files_per_page = value end
+    end
+    state.snapshot = current
+end
+
+-- Return the configured state and whether its single snapshot differs from
+-- the last completed render. configure itself never acknowledges the change.
+function ViewSettings.configure(menu, ui, options)
+    options = options or {}
+    local current = ViewSettings.snapshot(ui, options)
+    local mode, manager, browser = current.mode, current.manager, current.browser
     local previous = menu._minimalui_view
+    local settings_changed = snapshotsDiffer(previous and previous.snapshot, current)
     local saved = menu._minimalui_view_original
     if not saved then
         saved = {}
@@ -50,6 +126,9 @@ function ViewSettings.configure(menu, ui, options)
         mode = mode, manager = manager, browser = browser,
         close_manager = previous and previous.close_manager,
         kind = options.kind or "books", page = options.page,
+        force_classic = options.force_classic,
+        snapshot = previous and previous.snapshot,
+        pending_snapshot = current,
         native_update = Menu.updateItems,
     }
     menu._minimalui_view = state
@@ -57,7 +136,7 @@ function ViewSettings.configure(menu, ui, options)
     menu._do_hint_opened, menu._do_center_partial_rows = nil, nil
     menu.display_mode_type, menu.getBookInfo = nil, nil
     menu._recalculateDimen, menu._updateItemsBuildUI = Menu._recalculateDimen, nil
-    if not manager or not renderers[mode] then return state end
+    if not manager or not renderers[mode] then return state, settings_changed end
     state.covermenu = require("covermenu")
     state.renderer = require(renderers[mode])
     state.native_update = state.covermenu.updateItems
@@ -91,7 +170,7 @@ function ViewSettings.configure(menu, ui, options)
     else
         menu._do_hint_opened = manager:getSetting("history_hint_opened")
     end
-    return state
+    return state, settings_changed
 end
 
 function ViewSettings.release(menu)
@@ -113,6 +192,17 @@ local labels = {
     [_("Show file properties")] = "hide_file_info",
     [_("Shrink item font size to fit more text")] = "fixed_item_font_size",
     [_("Mosaic and detailed list settings")] = "coverbrowser_settings",
+    [_("Flash when displaying covers")] = "flash_ui_cover_images",
+    [_("Show progress in mosaic mode")] = "show_progress_in_mosaic",
+    [_("Show progress in detailed list mode")] = "hide_page_info",
+    [_("Show number of pages read instead of progress %")] = "show_pages_read_as_progress",
+    [_("Show number of pages left to read")] = "show_pages_left_in_progress",
+    [_("Show hint for book status in history")] = "history_hint_opened",
+    [_("Show hint for book status in collections")] = "collections_hint_opened",
+    [_("Do not show series metadata")] = "series_mode",
+    [_("Show series metadata in separate line")] = "series_mode",
+    [_("Append series metadata to title")] = "series_mode",
+    [_("Append series metadata to authors")] = "series_mode",
 }
 local hidden = { unified_display_mode = true, collection_display_mode = true, no_hint_description = true }
 local cover_settings_text = _("Mosaic and detailed list settings")
@@ -130,13 +220,62 @@ function ViewSettings.refreshViews(controller)
     if not controller:isEnabled() then return end
     for _, record in ipairs(controller.native_headers and controller.native_headers.pages or {}) do
         local widget = record.widget
-        if widget._minimalui_view and widget.updateItems then widget:updateItems() end
+        if widget._minimalui_view and widget.updateItems and ViewSettings.changed(widget, controller.ui) then
+            local previous = widget._minimalui_view.snapshot
+            local history = controller.ui.history
+            if previous and previous.history_datetime_short ~= nil
+                    and previous.history_datetime_short ~= G_reader_settings:isTrue("history_datetime_short")
+                    and history and history.booklist_menu == widget then
+                -- Native History rows are deep copies. Recreate their dates via
+                -- the owner, preserving its filtering and collection prefixes.
+                history:updateItemTable()
+            else
+                widget:updateItems()
+            end
+        end
     end
-    if controller.screen and controller.view == "library" then controller:queueLayout(true) end
+    if controller.screen and controller.view == "library"
+            and require("minimalui/libraryview").changed(controller.screen) then controller:queueLayout(true) end
 end
 
--- Return a new menu tree. Native/shared entries, callbacks and all unknown
--- options remain untouched; removal only applies to this menu presentation.
+-- Native TouchMenu closes immediately after opening these dialogs, before
+-- their close_callback saves the preview. Observe only the new dialog instance.
+local function geometryDialog(item, chooser)
+    if not chooser or not item.text_func or item.text or item.keep_menu_open then return end
+    local ok, text = pcall(item.text_func)
+    if not ok then return end
+    if text == T(_("Items per page in portrait mosaic mode: %1 × %2"), chooser.nb_cols_portrait, chooser.nb_rows_portrait)
+            or text == T(_("Items per page in landscape mosaic mode: %1 × %2"), chooser.nb_cols_landscape, chooser.nb_rows_landscape) then
+        return "ui/widget/doublespinwidget"
+    elseif text == T(_("Items per page in portrait list mode: %1"), chooser.files_per_page or 10) then
+        return "ui/widget/spinwidget"
+    end
+end
+
+local function geometryCallback(callback, module, controller)
+    return function(...)
+        local ui_manager = require("ui/uimanager")
+        local before = {}
+        for _, window in ipairs(ui_manager._window_stack) do before[window.widget] = true end
+        callback(...)
+        local dialog = require(module)
+        for i = #ui_manager._window_stack, 1, -1 do
+            local widget = ui_manager._window_stack[i].widget
+            if not before[widget] and getmetatable(widget) == dialog then
+                local original, close = rawget(widget, "close_callback"), widget.close_callback
+                widget.close_callback = function(...)
+                    widget.close_callback = original
+                    if close then close(...) end
+                    ViewSettings.refreshViews(controller)
+                end
+                break
+            end
+        end
+    end
+end
+
+-- Return a new menu tree. Known display callbacks notify the same comparator
+-- after native work; native/shared entries and unknown options stay untouched.
 function ViewSettings.filterMenu(root, controller)
     local browser = controller.ui and controller.ui.coverbrowser
     local manager = browser and package.loaded.bookinfomanager
@@ -174,7 +313,7 @@ function ViewSettings.filterMenu(root, controller)
                             G_reader_settings:saveSetting("minimalui_list_shrink_enabled", shrink)
                             manager:saveSetting(key, not shrink)
                             local chooser = controller.ui.file_chooser
-                            if chooser then chooser:updateItems(1, true) end
+                            if chooser and not chooser._minimalui_view then chooser:updateItems(1, true) end
                             ViewSettings.refreshViews(controller)
                         end
                     end
@@ -191,6 +330,17 @@ function ViewSettings.filterMenu(root, controller)
                             end
                             ViewSettings.refreshViews(controller)
                         end
+                    end
+                    if context == "cover_settings" and key and key ~= "fixed_item_font_size" and copy.callback then
+                        local callback = copy.callback
+                        copy.callback = function(...)
+                            callback(...)
+                            ViewSettings.refreshViews(controller)
+                        end
+                    end
+                    if context == "cover_settings" and copy.callback then
+                        local dialog = geometryDialog(item, controller.ui.file_chooser)
+                        if dialog then copy.callback = geometryCallback(copy.callback, dialog, controller) end
                     end
                     target[#target + 1] = copy
                 end
@@ -243,6 +393,12 @@ function ViewSettings.install(controller)
     -- Native setDisplayMode otherwise consults the saved unified flag and
     -- rewrites History/Collections. The original remains intact on its class.
     local browser = controller.ui.coverbrowser
+    if hook.browser ~= browser then
+        if hook.browser and hook.browser.setDisplayMode == hook.browser_handler then
+            hook.browser.setDisplayMode = hook.browser_original
+        end
+        hook.browser, hook.browser_original, hook.browser_handler = nil, nil, nil
+    end
     if browser and browser ~= hook.browser and browser.setupFileManagerDisplayMode then
         hook.browser, hook.browser_original = browser, rawget(browser, "setDisplayMode")
         hook.browser_handler = function(target, mode)

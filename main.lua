@@ -244,6 +244,8 @@ function MinimalUI:showNativeMenu()
             local on_close = container.onCloseWidget
             container.onCloseWidget = function(widget, ...)
                 if on_close then on_close(widget, ...) end
+                -- Native callbacks may already have rendered their consumer.
+                -- Compare the last completed render, including hidden Files.
                 ViewSettings.refreshViews(self)
             end
         end

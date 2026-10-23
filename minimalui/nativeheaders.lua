@@ -7,6 +7,7 @@ local ViewSettings = require("minimalui/viewsettings")
 local ViewRender = require("minimalui/viewrender")
 local ViewFooter = require("minimalui/viewfooter")
 local ViewFocus = require("minimalui/viewfocus")
+local FramePaint = require("minimalui/framepaint")
 local Size = require("ui/size")
 local _ = require("gettext")
 local T = require("ffi/util").template
@@ -28,6 +29,13 @@ local function replace(root, old, new)
     end
     if changed and root.resetLayout then root:resetLayout() end
     return changed
+end
+
+local function syncPaintRoot(record, key, frame)
+    if record[key] == frame then return end
+    if record[key] then FramePaint.release(record[key]) end
+    record[key] = frame
+    if frame then FramePaint.attach(frame) end
 end
 
 local function relayout(widget)
@@ -202,6 +210,24 @@ function NativeHeaders:adapt(widget, page, is_browser, show_context, opds_browse
     widget._minimal_header = record
     widget.title_bar, widget.custom_title_bar = header, header
     replace(widget, old, header)
+    if not record.view_options then
+        -- Details/OPDS keep native focus and painting; only their opaque root
+        -- background uses the same exact packed fill as managed book views.
+        self:hook(record.hooks, widget, "paintTo", function(_, fallback, target, bb, x, y)
+            syncPaintRoot(record, "paint_frame", target[1])
+            return fallback(target, bb, x, y)
+        end)
+    end
+    if is_browser then
+        -- FileManager paints a second white frame outside FileChooser. Install
+        -- before that frame is painted, not from the nested chooser's paint.
+        self:hook(record.hooks, ui, "paintTo", function(_, fallback, target, bb, x, y)
+            local frame = target[1]
+            if ui.file_chooser ~= widget or not frame or frame[1] ~= widget then frame = nil end
+            syncPaintRoot(record, "host_paint_frame", frame)
+            return fallback(target, bb, x, y)
+        end)
+    end
     if page == "HISTORY" or opds_browser then
         self:hook(record.hooks, header, "setLeftIcon", function(_, fallback, target, icon)
             return fallback(target, icon == "appbar.menu" and "plus" or icon)
@@ -295,9 +321,8 @@ function NativeHeaders:adapt(widget, page, is_browser, show_context, opds_browse
                 fallback = own_update or getmetatable(target).updateItems
             end
             if record.view_options then
-                local previous = target._minimalui_view
-                local state = ViewSettings.configure(target, ui, record.view_options)
-                if not previous or previous.mode ~= state.mode then no_recalculate_dimen = false end
+                local state, settings_changed = ViewSettings.configure(target, ui, record.view_options)
+                if settings_changed then no_recalculate_dimen = false end
                 target._updateItemsBuildUI = record.builder
                 ViewFocus.invalidate(target)
                 fallback = state.mode and ViewRender.updateCover or ViewRender.updateClassic
@@ -305,6 +330,7 @@ function NativeHeaders:adapt(widget, page, is_browser, show_context, opds_browse
             local result = pack(fallback(target, selected, no_recalculate_dimen))
             ViewFooter.apply(target)
             NativeHeaders.mergeTitleBarIntoLayout(target)
+            if record.view_options then ViewSettings.remember(target) end
             return unpack(result, 1, result.n)
         end)
     elseif widget._populateItems then
@@ -435,6 +461,8 @@ function NativeHeaders:release(record, refresh)
     -- restore the actual original instance methods, not leave inert wrappers.
     if record.details then ViewFooter.release(widget) end
     restoreHooks(record.hooks)
+    syncPaintRoot(record, "paint_frame", nil)
+    syncPaintRoot(record, "host_paint_frame", nil)
     ViewRender.release(widget)
     ViewSettings.release(widget)
     if widget._minimal_header == record then

@@ -120,12 +120,15 @@ end
 function MinimalScreen:setItems(title, items, index)
     self.title = title
     self.item_table = items
-    self.itemnumber = index or 1
+    local itemnumber = index or 1
+    -- A page restoration index is not a request to show a touch focus. This
+    -- matters when two saved modes map to the same effective book renderer.
+    self.itemnumber = Device:hasDPad() and itemnumber or nil
     if LibraryView.changed(self) then
-        self:rebuild(self.itemnumber)
+        self:rebuild(itemnumber)
         return
     end
-    self:switchItemTable(title, items, self.itemnumber)
+    self:switchItemTable(title, items, itemnumber)
 end
 
 function MinimalScreen:refreshMetadata()

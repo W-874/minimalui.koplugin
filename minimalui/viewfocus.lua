@@ -7,6 +7,7 @@ local Blitbuffer = BB
 local BD = require("ui/bidi")
 local Device = require("device")
 local Event = require("ui/event")
+local FramePaint = require("minimalui/framepaint")
 local UIManager = require("ui/uimanager")
 local ViewFocus = {}
 
@@ -123,9 +124,20 @@ local function signature(menu)
     return table.concat(values, "\0")
 end
 
+local function syncRoot(menu, state)
+    local frame = menu[1]
+    if state.frame == frame then return end
+    if state.frame then FramePaint.release(state.frame) end
+    state.frame = frame
+    if frame then FramePaint.attach(frame) end
+    -- A native init may replace the tree even when title/layout values match.
+    ViewFocus.invalidate(menu)
+end
+
 local function paintTo(menu, bb, x, y)
     local state = menu._minimal_view_focus
     if not state then return end
+    syncRoot(menu, state)
     local size = menu.dimen or menu:getSize()
     local width, height = size.w, size.h
     local kind, rotation, inverse = bb:getType(), bb:getRotation(), bb:getInverse()
@@ -201,18 +213,20 @@ function ViewFocus.onFocusMove(self, args)
 end
 
 function ViewFocus.attach(menu)
-    if menu._minimal_view_focus then return end
+    if menu._minimal_view_focus then syncRoot(menu, menu._minimal_view_focus); return end
     menu._minimal_view_focus = {
         raw_paint = rawget(menu, "paintTo"), original_paint = menu.paintTo,
         raw_focus = rawget(menu, "onFocusMove"),
     }
     menu.paintTo, menu.onFocusMove = paintTo, ViewFocus.onFocusMove
+    syncRoot(menu, menu._minimal_view_focus)
 end
 
 function ViewFocus.release(menu)
     local state = menu._minimal_view_focus
     if not state then return end
     ViewFocus.invalidate(menu)
+    if state.frame then FramePaint.release(state.frame); state.frame = nil end
     if menu.paintTo == paintTo then menu.paintTo = state.raw_paint end
     if menu.onFocusMove == ViewFocus.onFocusMove then menu.onFocusMove = state.raw_focus end
     menu._minimal_view_focus = nil

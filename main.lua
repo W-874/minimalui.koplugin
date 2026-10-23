@@ -206,6 +206,9 @@ function MinimalUI:showHome()
         id = "history", text = _("HISTORY"), callback = function() self.ui.history:onShowHist() end,
     }
     items[#items + 1] = {
+        id = "favorites", text = _("FAVORITES"), callback = function() self.ui.collections:onShowColl() end,
+    }
+    items[#items + 1] = {
         id = "browser", text = _("FILE BROWSER"), callback = function() self:showFileBrowser() end,
     }
     return self:showView("home", _("Minimal UI"), items, book, home_data)

@@ -251,6 +251,7 @@ function Home:bindKeys()
     if self.keyboard then
         self.key_events.MinimalLibrary = { { "L" } }
         self.key_events.MinimalHistory = { { "H" } }
+        self.key_events.MinimalFavorites = { { "C" } }
         self.key_events.MinimalBrowser = { { "F" } }
         for i = 1, 3 do
             self.key_events["MinimalRecent" .. i] = { { recent_keys[i] }, event = "MinimalRecent", args = i }
@@ -390,7 +391,7 @@ function Home:buildView()
     for i, item in ipairs(self.item_table) do
         if item.id == "continue" then
             continue_index = i
-        elseif item.id == "library" or item.id == "history" or item.id == "browser" then
+        elseif item.id == "library" or item.id == "history" or item.id == "favorites" or item.id == "browser" then
             nav[#nav + 1] = { index = i, item = item }
         end
     end
@@ -465,7 +466,7 @@ function Home:buildView()
         y = y + recent_height
     end
     if #nav > 0 then y = y + unit(22) end
-    local badges = { library = "L", history = "H", browser = "F" }
+    local badges = { library = "L", history = "H", favorites = "C", browser = "F" }
     for _, entry in ipairs(nav) do
         local item, index = entry.item, entry.index
         local row = canvas(width, nav_height)
@@ -670,6 +671,7 @@ end
 
 function Home:onMinimalLibrary() return self:activateId("library") end
 function Home:onMinimalHistory() return self:activateId("history") end
+function Home:onMinimalFavorites() return self:activateId("favorites") end
 function Home:onMinimalBrowser() return self:activateId("browser") end
 
 function Home:onMinimalRecent(index)

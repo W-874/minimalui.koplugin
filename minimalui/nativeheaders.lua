@@ -3,6 +3,7 @@ local FocusManager = require("ui/widget/focusmanager")
 local GestureRange = require("ui/gesturerange")
 local Header = require("minimalui/header")
 local UIManager = require("ui/uimanager")
+local ReadCollection = require("readcollection")
 local ViewSettings = require("minimalui/viewsettings")
 local ViewRender = require("minimalui/viewrender")
 local ViewFooter = require("minimalui/viewfooter")
@@ -47,6 +48,15 @@ local function context(title, subtitle)
     if not subtitle or subtitle == "" then return title end
     if not title or title == "" then return subtitle end
     return title .. " · " .. subtitle
+end
+
+local function collectionAnchor(widget)
+    local focused = widget.getFocusItem and widget:getFocusItem()
+    local entry = focused and focused.entry
+    if not entry and widget.getFirstVisibleItemIndex then
+        entry = widget.item_table[widget:getFirstVisibleItemIndex()]
+    end
+    return entry and entry.name
 end
 
 local function layoutDetails(widget, header)
@@ -145,6 +155,11 @@ function NativeHeaders:adapt(widget, page, is_browser, show_context, opds_browse
     if not widget or not widget.title_bar or widget._minimal_header then return end
     local controller, old = self.controller, widget.title_bar
     local ui, extra = controller.ui, {}
+    local collections = ui.collections
+    local collection_list = collections and widget == collections.coll_list
+        and collections.selected_collections == nil
+    local favorites = page == "COLLECTIONS" and collections
+        and widget == collections.booklist_menu and widget.path == ReadCollection.default_collection_name
     if is_browser then
         extra[#extra + 1] = {
             icon = ui.selected_files ~= nil and "check" or "plus", role = "left",
@@ -196,6 +211,12 @@ function NativeHeaders:adapt(widget, page, is_browser, show_context, opds_browse
         home_hold_callback = is_browser and old.left_icon_hold_callback or nil,
         extra_buttons = extra,
     }
+    if favorites then
+        -- Keep the COLLECTIONS settings profile; only this collection's visible
+        -- page name and native Return destination differ from custom lists.
+        header.fixed_title = "KO/FAVORITES"
+        header:setTitle(header.native_title, true)
+    end
     local record = {
         widget = widget, old = old, header = header, custom = widget.custom_title_bar,
         is_browser = is_browser,
@@ -210,6 +231,46 @@ function NativeHeaders:adapt(widget, page, is_browser, show_context, opds_browse
     widget._minimal_header = record
     widget.title_bar, widget.custom_title_bar = header, header
     replace(widget, old, header)
+    if favorites then
+        self:hook(record.hooks, widget, "onReturn", function(_, _, target)
+            target.close_callback()
+            return true
+        end)
+    end
+    if collection_list then
+        self:hook(record.hooks, widget, "switchItemTable", function(owner, fallback, target, title, items, number, match, subtitle)
+            items = items or target.item_table
+            local anchor = collectionAnchor(target)
+            local removed
+            for i = #items, 1, -1 do
+                if items[i].name == ReadCollection.default_collection_name then
+                    table.remove(items, i)
+                    removed = i
+                    if number and number >= i then number = math.max(0, number - 1) end
+                end
+            end
+            -- Native computes page count, row indices and focus from the final
+            -- table. Never hide a rendered row or modify ReadCollection data.
+            if removed and not match and (not number or number < 0) then
+                if anchor == ReadCollection.default_collection_name then
+                    local entry = items[math.min(removed, #items)]
+                    anchor = entry and entry.name
+                end
+                if anchor then match = { name = anchor } end
+            end
+            if match then
+                local key, value = next(match)
+                local found = false
+                for _, item in ipairs(items) do
+                    if item[key] == value then found = true; break end
+                end
+                -- In particular, an empty list must not send a stale Favorites
+                -- itemmatch to Menu's itemnumber=0 focus path.
+                if not found then match = nil end
+            end
+            return fallback(target, T(_("Collections (%1)"), #items), items, number, match, subtitle)
+        end)
+    end
     if not record.view_options then
         -- Details/OPDS keep native focus and painting; only their opaque root
         -- background uses the same exact packed fill as managed book views.
@@ -380,7 +441,12 @@ function NativeHeaders:adapt(widget, page, is_browser, show_context, opds_browse
         end)
         ui:updateTitleBarPath()
     end
-    relayout(widget)
+    if collection_list then
+        widget:switchItemTable(nil, widget.item_table, -1)
+        UIManager:setDirty(widget.show_parent or widget, "ui")
+    else
+        relayout(widget)
+    end
 end
 
 -- Local fullscreen menus (property lists and bookmark book filters) aren't
@@ -401,11 +467,25 @@ function NativeHeaders:watch(instance, method, page, field, show_context, scan, 
             before = {}
             for _, window in ipairs(UIManager._window_stack) do before[window.widget] = true end
         end
-        local result = pack(fallback(target, ...))
+        local result, first
+        if field == "coll_list" and select(1, ...) == nil and target.booklist_menu == nil
+                and ReadCollection.coll_default == ReadCollection.default_collection_name then
+            -- Native treats an existing book list as a request to browse all
+            -- collections. Scope that guard to this instance/call rather than
+            -- changing the user's saved default or the ReadCollection singleton.
+            local guard = {}
+            target.booklist_menu = guard
+            result = pack(pcall(fallback, target, ...))
+            if target.booklist_menu == guard then target.booklist_menu = nil end
+            if not result[1] then error(result[2], 0) end
+            first = 2
+        else
+            result, first = pack(fallback(target, ...)), 1
+        end
         local opds_browser = page == "OPDS" and (target.opds_browser or target) or nil
         owner:prune()
         if page == "BOOKMARKS" and target.ui and target.ui ~= owner.controller.ui then
-            return unpack(result, 1, result.n)
+            return unpack(result, first, result.n)
         end
         if field and not (field == "coll_list" and target.selected_collections ~= nil) then
             owner:adapt(target[field], page, false, show_context, opds_browser)
@@ -424,7 +504,7 @@ function NativeHeaders:watch(instance, method, page, field, show_context, scan, 
             end
         end
         owner:watchBookmarks()
-        return unpack(result, 1, result.n)
+        return unpack(result, first, result.n)
     end)
 end
 
@@ -440,6 +520,21 @@ function NativeHeaders:watchBookItems(instance, page)
         owner:adapt(target.booklist_menu, page, false, page == "COLLECTIONS")
         -- CoverBrowser changes the owner's class method when a setting changes.
         fallback = own or getmetatable(target).updateItemTable
+        return fallback(target, ...)
+    end)
+end
+
+function NativeHeaders:watchCollectionItems(instance)
+    if not instance or not instance.updateCollListItemTable then return end
+    for _, hook in ipairs(self.creators) do
+        if hook.target == instance and hook.name == "updateCollListItemTable" then return end
+    end
+    self:hook(self.creators, instance, "updateCollListItemTable", function(owner, fallback, target, ...)
+        -- onShowCollList creates Menu before population, as do its native
+        -- rebuild paths. Install the instance filter before the first switch.
+        if target.selected_collections == nil then
+            owner:adapt(target.coll_list, "COLLECTIONS", false)
+        end
         return fallback(target, ...)
     end)
 end
@@ -528,6 +623,7 @@ function NativeHeaders:apply(include_files)
     if include_files ~= false then self:adapt(ui.file_chooser, "FILES", true) end
     self:watchBookItems(ui.history, "HISTORY")
     self:watchBookItems(ui.collections, "COLLECTIONS")
+    self:watchCollectionItems(ui.collections)
     self:watchBookItems(ui.filesearcher, "SEARCH")
     self:watch(ui.history, "onShowHist", "HISTORY", "booklist_menu")
     self:watch(ui.opds, "onShowOPDSCatalog", "OPDS", "opds_browser", true)
@@ -596,15 +692,28 @@ function NativeHeaders:apply(include_files)
 end
 
 function NativeHeaders:restore()
+    local ui = self.controller.ui
+    local collections = ui.collections
+    local restore_list = not ui.tearing_down and not self.controller.closed and collections
+        and collections.selected_collections == nil and collections.coll_list
+        and UIManager:isWidgetShown(collections.coll_list)
+    local anchor = restore_list and collectionAnchor(collections.coll_list)
     restoreHooks(self.creators)
     self.creators = {}
     for state in pairs(self.callbacks) do state.owner = nil end
     self.callbacks = setmetatable({}, { __mode = "k" })
-    local ui = self.controller.ui
     for i = #self.pages, 1, -1 do
         local record = self.pages[i]
         self:release(record, not ui.tearing_down and not self.controller.closed
             and UIManager:isWidgetShown(record.widget.show_parent or record.widget))
+    end
+    if restore_list then
+        local previous = collections.from_collection_name
+        if anchor then collections.from_collection_name = collections:getCollectionTitle(anchor) end
+        -- The filtered item table is only a presentation cache. Rebuild from
+        -- native data after restoring hooks, even when this menu stays open.
+        collections:updateCollListItemTable(true)
+        collections.from_collection_name = previous
     end
 end
 

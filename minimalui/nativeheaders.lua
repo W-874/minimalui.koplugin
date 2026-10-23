@@ -211,15 +211,6 @@ function NativeHeaders:adapt(widget, page, is_browser, show_context, opds_browse
         -- Native catalog/download menus anchor to left_button. The navigation
         -- slot is Exit, not the menu that opened the anchored dialog.
         header.left_button = header.left_extra_button or header.menu_button
-        self:hook(record.hooks, widget, "init", function(owner, fallback, target, ...)
-            -- OPDS returns to its root with init(), and Menu.init rebuilds the
-            -- whole tree. Let native code own its paths and item tables, then
-            -- attach to the newly-created title bar instead of reusing ours.
-            owner:release(record, false)
-            local result = pack(fallback(target, ...))
-            owner:adapt(target, "OPDS", false, true, opds_browser)
-            return unpack(result, 1, result.n)
-        end)
         if widget == opds_browser then
             self:watch(widget, "showDownloadList", "OPDS", "download_list", true, false, record.hooks)
             self:watch(widget, "showFacetLinkList", "OPDS", nil, true, true, record.hooks)
@@ -317,8 +308,7 @@ function NativeHeaders:adapt(widget, page, is_browser, show_context, opds_browse
             return unpack(result, 1, result.n)
         end)
     elseif widget._populateItems then
-        -- Keep native KeyValuePage rows, callbacks and return/footer controls.
-        -- Add only the new header's focus targets after native population.
+        -- Keep native KeyValuePage rows and callbacks; share Menu's footer.
         self:hook(record.hooks, widget, "_populateItems", function(_, fallback, target, ...)
             local result = pack(fallback(target, ...))
             local rows = header:generateVerticalLayout()
@@ -329,12 +319,32 @@ function NativeHeaders:adapt(widget, page, is_browser, show_context, opds_browse
             return unpack(result, 1, result.n)
         end)
         record.details = true
+        self:hook(record.hooks, widget, "init", function(owner, fallback, target, ...)
+            -- Native init replaces the title bar and assembles its footer only
+            -- after _populateItems. Re-adapt the completed tree, not that
+            -- intermediate layout, and retire every old instance hook first.
+            owner:release(record, false)
+            local result = pack(fallback(target, ...))
+            owner:adapt(target, page, false, show_context)
+            return unpack(result, 1, result.n)
+        end)
+        ViewFooter.apply(widget)
         layoutDetails(widget, header)
+    end
+    if opds_browser then
+        -- Install outside Footer.init so teardown removes Header's wrapper
+        -- first, then Footer's, without retaining inert wrappers on re-init.
+        self:hook(record.hooks, widget, "init", function(owner, fallback, target, ...)
+            owner:release(record, false)
+            local result = pack(fallback(target, ...))
+            owner:adapt(target, "OPDS", false, true, opds_browser)
+            return unpack(result, 1, result.n)
+        end)
     end
     self:hook(record.hooks, widget, "onCloseWidget", function(owner, fallback, target, ...)
         local state = target._minimalui_view
         owner:release(record, false)
-        if state and state.native_close then return state.native_close(target, ...) end
+        if state then return require("minimalui/viewjobs").close(target, state.close_manager) end
         if fallback then return fallback(target, ...) end
     end)
     if is_browser then
@@ -420,6 +430,10 @@ end
 
 function NativeHeaders:release(record, refresh)
     local widget, header = record.widget, record.header
+    -- KeyValuePage installs its footer wrappers after the header's init and
+    -- population hooks. Remove that outer layer first, so restoreHooks can
+    -- restore the actual original instance methods, not leave inert wrappers.
+    if record.details then ViewFooter.release(widget) end
     restoreHooks(record.hooks)
     ViewRender.release(widget)
     ViewSettings.release(widget)

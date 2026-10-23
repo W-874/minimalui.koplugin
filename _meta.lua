@@ -1,6 +1,6 @@
 local _ = require("gettext")
 return {
     fullname = _("Minimal UI"),
-    version = "0.5.3",
+    version = "0.6.0",
     description = _([[Lightweight Home and Library with native KOReader menus, file browser and reader.]]),
 }

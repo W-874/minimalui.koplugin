@@ -48,6 +48,7 @@ function ViewSettings.configure(menu, ui, options)
     end
     local state = {
         mode = mode, manager = manager, browser = browser,
+        close_manager = previous and previous.close_manager,
         kind = options.kind or "books", page = options.page,
         native_update = Menu.updateItems,
     }
@@ -61,7 +62,7 @@ function ViewSettings.configure(menu, ui, options)
     state.renderer = require(renderers[mode])
     state.native_update = state.covermenu.updateItems
     state.native_builder = state.renderer._updateItemsBuildUI
-    state.native_close = state.covermenu.onCloseWidget
+    state.close_manager = manager
     -- Native getUpdateItemTableFunc would otherwise install its first-use
     -- methods over our instance wrappers when an originally Classic BookList
     -- is revisited after a display-mode change. We now own that setup.

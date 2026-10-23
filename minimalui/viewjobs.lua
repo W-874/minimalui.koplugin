@@ -109,4 +109,23 @@ function ViewJobs.start(menu, manager)
     UIManager:scheduleIn(1, state.poll)
 end
 
+-- CoverMenu:onCloseWidget also terminates every manager-owned subprocess.
+-- Managed pages must keep its other cleanup without killing a newer page's
+-- extraction. Leave reaping/standby accounting to the native collector.
+function ViewJobs.close(menu, manager)
+    ViewJobs.cancel(menu, true)
+    local Menu = require("ui/widget/menu")
+    if not manager then return Menu.onCloseWidget(menu) end
+    if menu._covermenu_onclose_done then return end
+    menu._covermenu_onclose_done = true
+    manager:closeDbConnection()
+    manager:cleanUp() -- defers temporary-cache removal while any PID lives
+    menu.item_group:free()
+    UIManager:scheduleIn(0.2, function()
+        collectgarbage()
+        collectgarbage()
+    end)
+    return Menu.onCloseWidget(menu)
+end
+
 return ViewJobs

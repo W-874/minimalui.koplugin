@@ -1,5 +1,5 @@
--- Instance-only three-zone pagination. Native Menu v2026.07.1 retains ownership
--- of the buttons, their callbacks, and the jump/search input dialog.
+-- Instance-only three-zone pagination. Native Menu and KeyValuePage retain
+-- ownership of the buttons, their callbacks, and the jump/search input dialog.
 local Geom = require("ui/geometry")
 local GestureRange = require("ui/gesturerange")
 local InputContainer = require("ui/widget/container/inputcontainer")
@@ -80,37 +80,51 @@ local function hook(record, target, name, handler)
     target[name] = wrapper
 end
 
+local function pagination(record)
+    local menu = record.menu
+    if record.key_value then return menu.pages >= 1, menu.show_page, menu.pages end
+    return #menu.item_table > 0, menu.page, menu.page_num
+end
+
 local function configureText(record, button, width)
     if not record.text then
         record.text = button
         record.attributes = {}
-        for _, key in ipairs({ "width", "height", "text_font_bold" }) do
+        for _, key in ipairs({ "width", "height", "text_font_bold", "text_font_face" }) do
             record.attributes[key] = { value = rawget(button, key) }
         end
         hook(record, button, "setText", function(rec, fallback, target, text, requested_width)
             if rec.updating then
-                if #rec.menu.item_table > 0 then text = T("%1/%2", rec.menu.page, rec.menu.page_num) end
+                local has_items, page, pages = pagination(rec)
+                if has_items then text = T("%1/%2", page, pages) end
                 -- Button:setText's fixed-width path updates its existing label.
                 requested_width = target.width
             end
             return fallback(target, text, requested_width)
         end)
     end
-    if button.width ~= width or not button.text_font_bold then
+    if button.width ~= width or not button.text_font_bold or button.text_font_face ~= "cfont" then
         local label_height = button.label_container:getSize().h
-        button.width, button.height, button.text_font_bold = width, label_height, true
+        button.width, button.height = width, label_height
+        button.text_font_bold, button.text_font_face = true, "cfont"
         button.label_widget:free()
         button:init()
     end
 end
 
-local function ensure(record)
+local function ensure(record, after_init)
     local menu = record.menu
     if not menu or menu._minimal_view_footer ~= record then return false end
-    if not menu.page_info or not menu.page_info_text or not menu.inner_dimen then return false end
-    if menu.page_info == record.footer then return true end
+    if not menu.page_info or not menu.page_info_text then return false end
+    if menu.page_info == record.footer then
+        -- KeyValuePage populates before assigning its final tree. Its local
+        -- BottomContainer still points at the native group until init returns.
+        if after_init then replace(menu, record.original, record.footer) end
+        return true
+    end
     -- A native init has made a fresh HorizontalGroup and BottomContainer.
-    local original, width = menu.page_info, menu.inner_dimen.w
+    local original = menu.page_info
+    local width = record.key_value and menu.dimen.w or menu.inner_dimen.w
     local height, third = original:getSize().h, math.floor(width / 3)
     configureText(record, menu.page_info_text, third)
     local function zone(button, side, x, w)
@@ -138,16 +152,16 @@ local function finish(record)
     menu.page_info_last_chev:hide()
     -- Native disables the input on a one-page menu. Keep native jump/search
     -- available there too; an empty menu retains its native No items behavior.
-    if #menu.item_table > 0 then menu.page_info_text:enable() end
+    if pagination(record) then menu.page_info_text:enable() end
 end
 
 function ViewFooter.apply(menu)
     if not menu or not menu.page_info or not menu.page_info_text then return false end
     local record = menu._minimal_view_footer
     if record then ensure(record); finish(record); return true end
-    record = { menu = menu, hooks = {} }
+    record = { menu = menu, hooks = {}, key_value = not menu.updatePageInfo and menu._populateItems ~= nil }
     menu._minimal_view_footer = record
-    hook(record, menu, "updatePageInfo", function(rec, fallback, target, ...)
+    hook(record, menu, record.key_value and "_populateItems" or "updatePageInfo", function(rec, fallback, target, ...)
         ensure(rec)
         rec.updating = true
         local result = pack(pcall(fallback, target, ...))
@@ -158,13 +172,13 @@ function ViewFooter.apply(menu)
     end)
     hook(record, menu, "init", function(rec, fallback, target, ...)
         local result = pack(fallback(target, ...))
-        ensure(rec)
+        ensure(rec, true)
         finish(rec)
         return unpack(result, 1, result.n)
     end)
     ensure(record)
     record.updating = true
-    menu.page_info_text:setText(#menu.item_table > 0 and "" or _("No items"))
+    menu.page_info_text:setText(pagination(record) and "" or _("No items"))
     record.updating = nil
     finish(record)
     return true
@@ -182,18 +196,19 @@ function ViewFooter.release(menu)
         replace(menu, record.footer, record.original)
         menu.page_info = record.original
     end
+    local has_items, page, pages = pagination(record)
     local button = record.text
     if button then
         for key, saved in pairs(record.attributes) do button[key] = saved.value end
-        button.text = #menu.item_table > 0 and T(_("Page %1 of %2"), menu.page, menu.page_num) or _("No items")
+        button.text = has_items and T(_("Page %1 of %2"), page, pages) or _("No items")
         button.label_widget:free()
         button:init()
-        if #menu.item_table > 0 and menu.page_num > 1 then button:enable()
+        if has_items and pages > 1 then button:enable()
         else button:disableWithoutDimming() end
     end
     for _, name in ipairs({ "first", "last" }) do
         local chev = menu["page_info_" .. name .. "_chev"]
-        chev:showHide(#menu.item_table > 0)
+        chev:showHide(has_items)
     end
     if menu.page_info.resetLayout then menu.page_info:resetLayout() end
     menu._minimal_view_footer = nil

@@ -114,13 +114,12 @@ end
 
 function LibraryView.release(screen)
     require("minimalui/viewrender").release(screen)
-    local covermenu = screen._library_covermenu
+    local manager = screen._minimalui_view and screen._minimalui_view.close_manager
     ViewSettings.release(screen)
-    if not covermenu then return false end
+    if not screen._library_covermenu then return false end
     screen._library_covermenu = nil
-    -- Use the original renderer even if ui.coverbrowser has since disappeared.
-    -- This terminates extraction, closes its DB and cancels scheduled item updates.
-    covermenu.onCloseWidget(screen)
+    -- Keep native resource cleanup, but never terminate another page's batch.
+    require("minimalui/viewjobs").close(screen, manager)
     screen.items_to_update = nil
     screen.cover_specs = nil
     screen.dithered = nil

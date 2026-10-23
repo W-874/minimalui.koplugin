@@ -52,7 +52,10 @@ function MinimalUI:init()
     self.closed = false
     if self.ui.document then
         self.reader_bridge = ReaderBridge:new{ controller = self }
-        if self:isEnabled() then self.reader_bridge:install() end
+        if self:isEnabled() then
+            ViewSettings.install(self)
+            self.reader_bridge:install()
+        end
         return
     end
     self.focus = {}

@@ -276,13 +276,19 @@ end
 
 -- Return a new menu tree. Known display callbacks notify the same comparator
 -- after native work; native/shared entries and unknown options stay untouched.
+-- CoverBrowser is optional: native launch entries still need hiding without it.
+-- Reader registers those launch entries but never CoverBrowser's display modes,
+-- so its menu is filtered for launches only and keeps every mode entry intact.
 function ViewSettings.filterMenu(root, controller)
-    local browser = controller.ui and controller.ui.coverbrowser
+    local ui = controller.ui or {}
+    local browser = ui.coverbrowser
     local manager = browser and package.loaded.bookinfomanager
-    if not manager then return root end
+    local display = manager and not ui.document
     local mode_by_text = {}
-    for _, option in ipairs(browser.modes or {}) do mode_by_text[option[1]] = { mode = option[2] } end
-    local book_page = activeKind(controller) == "books"
+    if display then
+        for _, option in ipairs(browser.modes or {}) do mode_by_text[option[1]] = { mode = option[2] } end
+    end
+    local book_page = display and activeKind(controller) == "books"
     local function clone(source, context)
         local target = {}
         for key, value in pairs(source) do
@@ -294,19 +300,24 @@ function ViewSettings.filterMenu(root, controller)
             else
                 local key = item.key or item.id or item.setting
                 -- Labels are deliberately scoped to CoverBrowser's two roots.
-                key = key or ((context == "display" or context == "cover_settings" or context == "history") and labels[item.text])
-                    or (context == "settings" and item.text == cover_settings_text and "coverbrowser_settings")
+                if display and not key then
+                    key = ((context == "display" or context == "cover_settings" or context == "history") and labels[item.text])
+                        or (context == "settings" and item.text == cover_settings_text and "coverbrowser_settings")
+                end
                 local next_context = key == "filemanager_display_mode" and "display"
                     or key == "history_display_mode" and "history"
                     or key == "coverbrowser_settings" and "cover_settings"
                     or key == "filebrowser_settings" and "settings" or context
-                local choice = mode_by_text[item.text]
-                local remove = hidden[key] or (key == "hide_file_info" and book_page)
-                    or (context == "history" and choice and (not choice.mode or choice.mode == "list_image_filename"))
+                local choice = display and mode_by_text[item.text]
+                -- Native launch entries carry MenuSorter ids. Translated labels
+                -- also name unrelated plugins and collections, so never match them.
+                local remove = item.id == "history" or item.id == "favorites"
+                    or (display and (hidden[key] or (key == "hide_file_info" and book_page)
+                        or (context == "history" and choice and (not choice.mode or choice.mode == "list_image_filename"))))
                 if not remove then
                     local copy = clone(item, next_context)
-                    if key == "history_display_mode" then copy.enabled_func = function() return true end end
-                    if key == "fixed_item_font_size" then
+                    if display and key == "history_display_mode" then copy.enabled_func = function() return true end end
+                    if display and key == "fixed_item_font_size" then
                         copy.checked_func = function() return ViewSettings.shrinkEnabled(manager) end
                         copy.callback = function()
                             local shrink = not ViewSettings.shrinkEnabled(manager)
@@ -317,7 +328,7 @@ function ViewSettings.filterMenu(root, controller)
                             ViewSettings.refreshViews(controller)
                         end
                     end
-                    if choice and (context == "display" or context == "history") then
+                    if display and choice and (context == "display" or context == "history") then
                         local mode = choice.mode
                         copy.checked_func = function()
                             return ViewSettings.effectiveMode(controller.ui, context == "display" and "files" or "books") == mode
@@ -331,14 +342,14 @@ function ViewSettings.filterMenu(root, controller)
                             ViewSettings.refreshViews(controller)
                         end
                     end
-                    if context == "cover_settings" and key and key ~= "fixed_item_font_size" and copy.callback then
+                    if display and context == "cover_settings" and key and key ~= "fixed_item_font_size" and copy.callback then
                         local callback = copy.callback
                         copy.callback = function(...)
                             callback(...)
                             ViewSettings.refreshViews(controller)
                         end
                     end
-                    if context == "cover_settings" and copy.callback then
+                    if display and context == "cover_settings" and copy.callback then
                         local dialog = geometryDialog(item, controller.ui.file_chooser)
                         if dialog then copy.callback = geometryCallback(copy.callback, dialog, controller) end
                     end

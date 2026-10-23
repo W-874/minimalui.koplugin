@@ -116,7 +116,7 @@ function Bridge:restore()
         -- Native browser entries close/save the reader before calling
         -- showFileManager. Finalize/CloseWidget can stop this plugin during
         -- that close: keep only the destination wrapper until the entry exits.
-        if not record.is_destination or self.entry_depth == 0 then
+        if record.is_destination ~= true or self.entry_depth == 0 then
             if record.instance[record.method] == record.wrapper then
                 record.instance[record.method] = record.original
             end

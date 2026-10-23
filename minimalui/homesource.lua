@@ -208,28 +208,36 @@ function HomeSource.collect(ui, book, library_count, cache)
     local current = cache and {}
     local data = {
         recent = {},
-        history_count = 0,
+        history_count = opts.counts and 0 or nil,
         library_count = library_count,
         browser_path = ui and ui.file_chooser and ui.file_chooser.path or nil,
         options = opts,
     }
     if book then readBook(book, opts.metadata, previous, current) end
     local seen = {}
+    local need_featured_time = book ~= nil and opts.metadata
     for _, entry in ipairs(ReadHistory.hist or {}) do
+        -- Counts require checking the complete history. Without that visible
+        -- detail, stop as soon as the visible cards and timestamp are known.
+        if not opts.counts and not need_featured_time
+                and (not opts.recent or #data.recent == 3) then break end
         local path = entry.file
         if type(path) == "string" and not seen[path] then
             seen[path] = true
-            if isFile(path) then
-                data.history_count = data.history_count + 1
-                if book and path == book.path then
+            local featured = book and path == book.path
+            local need_recent = opts.recent and not featured and #data.recent < 3
+            if (opts.counts or (featured and need_featured_time) or need_recent) and isFile(path) then
+                if opts.counts then data.history_count = data.history_count + 1 end
+                if featured then
                     lastRead(book, entry.time, opts.metadata)
-                elseif opts.recent and #data.recent < 3 then
+                elseif need_recent then
                     local recent = { path = path }
                     readBook(recent, opts.metadata, previous, current)
                     lastRead(recent, entry.time, opts.metadata)
                     data.recent[#data.recent + 1] = recent
                 end
             end
+            if featured then need_featured_time = false end
         end
     end
     if cache then cache.books = current end

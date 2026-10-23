@@ -26,13 +26,22 @@ function Books.scan()
     -- Recursive scope, sorting and presentation remain product decisions.
     local ok, books = pcall(function()
         local result = {}
+        local eligibility = {}
         for name in lfs.dir(root) do
             if name:sub(1, 1) ~= "." then
                 local path = root .. "/" .. name
+                -- Keep every suffix component: .fb2.zip and .zip need not
+                -- have the same provider. The cache lasts only this scan, so
+                -- newly registered providers are visible on the next entry.
+                local suffix = (name:match("%..*$") or ""):lower()
+                local eligible = eligibility[suffix]
+                if eligible == nil then
+                    eligible = not not DocumentRegistry:getProviders(path)
+                    eligibility[suffix] = eligible
+                end
                 -- Do not expose directories, symlinks or auxiliary tools as books.
                 -- getProviders is extension-only; hasProvider can read sidecars.
-                if lfs.symlinkattributes(path, "mode") == "file"
-                        and DocumentRegistry:getProviders(path) then
+                if eligible and lfs.symlinkattributes(path, "mode") == "file" then
                     result[#result + 1] = { path = path, title = name }
                 end
             end

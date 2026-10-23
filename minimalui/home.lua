@@ -242,7 +242,8 @@ function Home:getCover(path, height, width)
     local key = coverKey(path, height, width)
     local entry = self.cover_cache[key]
     if not entry then
-        entry = { path = path, signature = Cover.signature(path), bb = Cover.load(path, height, width) }
+        local source = Cover.resolve(path)
+        entry = { path = path, signature = source.signature, bb = Cover.load(path, height, width, source) }
         self.cover_cache[key] = entry
     end
     return entry.bb

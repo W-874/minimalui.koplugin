@@ -1,5 +1,5 @@
 -- Loads the native cover of exactly one book (custom cover first), scaled to fit.
--- Static custom images avoid opening a book; other covers use the native registry.
+-- Static images avoid opening a book; other covers use the native registry.
 -- The fallback protects the BookInfo:getCoverImage() registry chain: unlike that
 -- helper, it always closes the document even if getCoverPageImage() raises.
 local CanvasContext = require("document/canvascontext")
@@ -38,7 +38,7 @@ end
 
 -- Static custom images use the selected provider's exact decoder/rasterizer,
 -- without DocumentRegistry's two GC sweeps or the full-size cover copies.
-local function extractCustomImage(file)
+local function extractImage(file)
     local extension = file:match("%.([^.]+)$")
     extension = extension and extension:lower()
     if extension ~= "jpg" and extension ~= "jpeg" and extension ~= "png" then return end
@@ -82,9 +82,12 @@ end
 
 -- Retained Home buffers are reusable only while their source and raster context
 -- match. Native metadata events also invalidate them (same-second writes).
-function Cover.signature(path)
+function Cover.resolve(path)
+    -- A cold card needs both the signature and the selected source. Resolve
+    -- custom-cover directories once and pass this short-lived result to load.
+    local resolved = { path = path, custom = customCoverFile(path) }
     local ok, signature = pcall(function()
-        local custom = customCoverFile(path)
+        local custom = resolved.custom
         local source = custom or path
         local attr = lfs.attributes(source)
         local book = custom and lfs.attributes(path) or attr
@@ -106,7 +109,12 @@ function Cover.signature(path)
             tostring(G_defaults:readSetting("DKOPTREADER_CONFIG_TEXT_WRAP")),
         }, "\0")
     end)
-    return ok and signature or nil
+    resolved.signature = ok and signature or nil
+    return resolved
+end
+
+function Cover.signature(path)
+    return Cover.resolve(path).signature
 end
 
 -- Aspect-preserving size that fits both height and max_width.
@@ -122,19 +130,26 @@ end
 
 --- Returns an owned, aspect-preserving BlitBuffer scaled to `height` (or narrower/shorter when
 --- that would exceed `max_width`), or nil, err when the book has no cover. Caller frees it.
-function Cover.load(path, height, max_width)
+function Cover.load(path, height, max_width, resolved)
     if type(path) ~= "string" or path == "" then return nil, "invalid path" end
     height = type(height) == "number" and math.floor(height) or 0
     max_width = type(max_width) == "number" and math.floor(max_width) or 0
     if height < 1 or max_width < 1 then return nil, "invalid size" end
 
     local bb, err
-    local custom = customCoverFile(path)
+    local custom
+    if resolved and resolved.path == path then custom = resolved.custom
+    else custom = customCoverFile(path) end
     if custom then
-        bb = extractCustomImage(custom)
+        bb = extractImage(custom)
         if not bb then bb, err = extract(custom) end
     end
-    if not bb then bb, err = extract(path) end
+    if not bb then
+        -- JPEG/PNG documents have the same native decoder as custom covers.
+        -- Transfer its buffer without the registry/full-size-copy overhead.
+        bb = extractImage(path)
+        if not bb then bb, err = extract(path) end
+    end
     if not bb then return nil, err end
 
     local bw, bh = bb:getWidth(), bb:getHeight()

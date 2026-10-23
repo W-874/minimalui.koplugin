@@ -24,6 +24,7 @@ local T = require("ffi/util").template
 local Screen = Device.screen
 
 local recent_keys = { "Q", "W", "E" }
+local option_fields = { "recent", "covers", "metadata", "stats", "counts" }
 
 local Home = InputContainer:extend{
     name = "minimalui_home",
@@ -168,6 +169,39 @@ local function progressText(book)
     if n then return string.format("%d%%", math.floor(n * 100 + 0.5)) end
 end
 
+local function cardContent(book, featured, show_metadata)
+    local progress = progressText(book) or (featured and _("Progress unavailable") or nil)
+    local remaining = show_metadata and featured and book.chapter_time_text
+    if remaining then remaining = T(_("Chapter left %1"), remaining) end
+    local metadata = show_metadata and authors(book)
+    if featured and show_metadata and book.chapter then
+        metadata = metadata and metadata ~= "" and (metadata .. " · " .. book.chapter) or book.chapter
+    end
+    if metadata == "" then metadata = nil end
+    local bar = fraction(book)
+    local show_bar = featured or (bar ~= nil and bar ~= 1 and book.status ~= "complete" and book.status ~= "finished")
+    return {
+        path = book.path, title = tostring(book.title or book.path or ""), metadata = metadata or nil,
+        bottom = progress and remaining and (progress .. " · " .. remaining) or progress or remaining,
+        show_bar = show_bar, bar = show_bar and (bar or 0) or nil,
+    }
+end
+
+local function navDetail(data, id)
+    if (data.options or {}).counts == false then return end
+    if id == "library" then return data.library_count ~= nil and tostring(data.library_count) or "documents" end
+    if id == "history" then return data.history_count ~= nil and tostring(data.history_count) or nil end
+    if id == "browser" and data.browser_path then return tostring(data.browser_path) end
+end
+
+local function statsText(data)
+    if (data.options or {}).stats ~= false and data.stats_text then return tostring(data.stats_text) end
+end
+
+local function lastRead(book, show_metadata)
+    if book and show_metadata and book.last_read_text then return tostring(book.last_read_text) end
+end
+
 function Home:init()
     self.width, self.height = Screen:getWidth(), Screen:getHeight()
     self.has_keys, self.few_keys = Device:hasKeys(), Device:hasFewKeys()
@@ -266,22 +300,14 @@ function Home:bookCard(book, width, height, index, recent_index, cover_height, c
     local line = math.max(10, math.floor(Screen:scaleBySize(featured and 23 or 18) * ratio))
     local progress_height = math.max(2, math.floor(Screen:scaleBySize(featured and 7 or 4) * ratio))
     local small_gap = math.max(2, math.floor(Screen:scaleBySize(7) * ratio))
-    local progress = progressText(book) or (featured and _("Progress unavailable") or nil)
-    local remaining = self.show_metadata and featured and book.chapter_time_text
-    if remaining then remaining = T(_("Chapter left %1"), remaining) end
-    local bottom = progress and remaining and (progress .. " · " .. remaining) or progress or remaining
-    local metadata = self.show_metadata and authors(book)
-    if featured and self.show_metadata and book.chapter then
-        metadata = metadata and metadata ~= "" and (metadata .. " · " .. book.chapter) or book.chapter
-    end
-    if metadata == "" then metadata = nil end
-    local bar = fraction(book)
-    local show_bar = featured or (bar ~= nil and bar ~= 1 and book.status ~= "complete" and book.status ~= "finished")
+    local displayed = cardContent(book, featured, self.show_metadata)
+    self.card_content[index] = displayed
+    local bottom, metadata, bar, show_bar = displayed.bottom, displayed.metadata, displayed.bar, displayed.show_bar
     local reserved = (metadata and line + small_gap or 0)
         + (bottom and line + small_gap or 0)
         + (show_bar and progress_height + small_gap or 0)
     local title_height = math.max(line, inner_height - reserved)
-    local title_widget = title(book.title or book.path, featured and 27 or 15, title_width, title_height)
+    local title_widget = title(displayed.title, featured and 27 or 15, title_width, title_height)
     place(content, title_widget, text_x, pad)
     local y = pad + title_height + small_gap
     if metadata then
@@ -337,8 +363,12 @@ end
 function Home:buildView()
     local scale = function(n) return Screen:scaleBySize(n) end
     local data, options = self.home_data, self.home_data.options or {}
+    self.display_options = {}
+    for _, key in ipairs(option_fields) do self.display_options[key] = options[key] ~= false end
     self.show_covers, self.show_metadata = options.covers ~= false, options.metadata ~= false
     self.rows, self.focus_frames, self.row_books = {}, {}, {}
+    self.card_content, self.nav_details = {}, {}
+    self.stats_widget = nil
     self.focus_exclusions, self.cover_widgets, self.badge_widgets = {}, {}, {}
     self.recent_indices = {}
     self.cover_bb, self.cover_widget, self.featured_title, self.title_widget = nil, nil, nil, nil
@@ -370,7 +400,7 @@ function Home:buildView()
         end
     end
     local has_recent = #recent > 0
-    local stats = options.stats ~= false and data.stats_text
+    local stats = statsText(data)
     local available = math.max(1, self.height - self.header_height)
     local nav_height = math.min(scale(64), math.max(scale(48), math.floor(available * 0.085)))
     nav_height = math.min(nav_height, math.floor(available / math.max(1, #nav)))
@@ -401,8 +431,9 @@ function Home:buildView()
     local label_height = unit(26)
     local section = text(_("Continue reading"), 16, false, width * 0.48, label_height)
     place(body, section, margin, y)
-    if self.book and self.show_metadata and self.book.last_read_text then
-        local last = text(self.book.last_read_text, 15, false, math.floor(width * 0.48), label_height)
+    self.last_read_text = lastRead(self.book, self.show_metadata)
+    if self.last_read_text then
+        local last = text(self.last_read_text, 15, false, math.floor(width * 0.48), label_height)
         place(body, last, margin + width - last:getWidth(), y)
     end
     y = y + label_height + unit(8)
@@ -444,12 +475,7 @@ function Home:buildView()
             place(row, frame(badge, nil, Size.line.medium), x, math.floor((nav_height - badge_size) / 2))
             x = x + badge_size + unit(15)
         end
-        local detail
-        if options.counts ~= false then
-            if item.id == "library" then detail = data.library_count ~= nil and tostring(data.library_count) or "documents"
-            elseif item.id == "history" and data.history_count ~= nil then detail = tostring(data.history_count)
-            elseif item.id == "browser" then detail = data.browser_path end
-        end
+        local detail = navDetail(data, item.id)
         local arrow = text("›", 22, false, unit(18), line_height)
         place(row, arrow, width - pad - arrow:getWidth(), math.floor((nav_height - arrow:getSize().h) / 2))
         local usable = width - x - 2 * pad - arrow:getWidth()
@@ -457,11 +483,16 @@ function Home:buildView()
         local label_width = usable - (detail and detail_width + unit(12) or 0)
         local label = text(item.text, 22, false, label_width, line_height)
         place(row, label, x, math.floor((nav_height - label:getSize().h) / 2))
+        local detail_entry = { id = item.id, label = label.text }
+        self.nav_details[index] = detail_entry
         if detail then
             local value = text(detail, 16, false, detail_width, line_height, nil,
                 item.id == "browser")
             place(row, value, width - pad - arrow:getWidth() - unit(10) - value:getWidth(),
                 math.floor((nav_height - value:getSize().h) / 2))
+            detail_entry.widget = value
+            detail_entry.right = width - pad - arrow:getWidth() - unit(10)
+            detail_entry.height = nav_height
         end
         local row_frame = frame(row, Blitbuffer.COLOR_WHITE)
         row_frame.invert = self.selected == index
@@ -476,7 +507,7 @@ function Home:buildView()
     end
     if stats then
         y = y + unit(22)
-        place(body, text(stats, 15, false, width, unit(24)), margin, y)
+        self.stats_widget = place(body, text(stats, 15, false, width, unit(24)), margin, y)
     end
     self.body = body
     local view = canvas(self.width, self.height)
@@ -704,9 +735,7 @@ function Home:onMinimalSwipe(_, ges)
     return true
 end
 
-local book_fields = { "path", "title", "authors", "fraction", "status", "chapter", "chapter_time_text", "last_read_text" }
-local home_fields = { "history_count", "library_count", "browser_path", "stats_text" }
-local option_fields = { "recent", "covers", "metadata", "stats", "counts" }
+local card_fields = { "path", "title", "metadata", "bottom", "show_bar", "bar" }
 
 local function sameFields(a, b, fields)
     if a == b then return true end
@@ -715,21 +744,68 @@ local function sameFields(a, b, fields)
     return true
 end
 
+local function visibleBooks(items, book, data)
+    local visible = {}
+    for i, item in ipairs(items) do
+        if item.id == "continue" and book then visible[i] = book end
+    end
+    if (data.options or {}).recent ~= false then
+        local count = 0
+        for _, recent in ipairs(data.recent or {}) do
+            if count == 3 then break end
+            for i, item in ipairs(items) do
+                if item.id == "recent:" .. recent.path then
+                    visible[i], count = recent, count + 1
+                    break
+                end
+            end
+        end
+    end
+    return visible
+end
+
 local function sameHome(screen, items, book, data)
-    if not sameFields(screen.book, book, book_fields) or #screen.item_table ~= #items then return false end
-    local previous = screen.home_data
-    if not sameFields(previous, data, home_fields)
-            or not sameFields(previous.options, data.options, option_fields)
-            or #previous.recent ~= #data.recent then return false end
+    if #screen.item_table ~= #items then return false end
+    for _, key in ipairs(option_fields) do
+        if screen.display_options[key] ~= ((data.options or {})[key] ~= false) then return false end
+    end
+    if screen.last_read_text ~= lastRead(book, screen.show_metadata)
+            or not not screen.stats_widget ~= not not statsText(data) then return false end
+    local visible = visibleBooks(items, book, data)
     for i, item in ipairs(items) do
         local old = screen.item_table[i]
-        if old.id ~= item.id or old.text ~= item.text or old.file ~= item.file then return false end
-    end
-    for i, recent in ipairs(data.recent) do
-        if not sameFields(previous.recent[i], recent, book_fields) then return false end
+        if old.id ~= item.id then return false end
+        local detail = screen.nav_details[i]
+        if detail and (detail.label ~= tostring(item.text or "")
+                or not not detail.widget ~= not not navDetail(data, item.id)) then return false end
+        local content = visible[i] and cardContent(visible[i], item.id == "continue", screen.show_metadata)
+        if not sameFields(screen.card_content[i], content, card_fields) then return false end
     end
     for _, cover in pairs(screen.cover_cache or {}) do if cover.invalid then return false end end
-    return true
+    return true, visible
+end
+
+function Home:updateDetails(data)
+    local changed = false
+    for _, entry in pairs(self.nav_details) do
+        local widget = entry.widget
+        local value = navDetail(data, entry.id)
+        if widget and widget.text ~= value then
+            widget:setText(value)
+            widget.overlap_offset[1] = entry.right - widget:getWidth()
+            widget.overlap_offset[2] = math.floor((entry.height - widget:getSize().h) / 2)
+            changed = true
+        end
+    end
+    local stats = statsText(data)
+    if self.stats_widget and self.stats_widget.text ~= stats then
+        self.stats_widget:setText(stats)
+        changed = true
+    end
+    if changed then
+        self:freePaintCache()
+        UIManager:setDirty(self, "ui")
+    end
 end
 
 function Home:layoutChanged()
@@ -746,9 +822,12 @@ function Home:setContent(items, book, index, home_data)
             if not signature or signature ~= entry.signature then entry.invalid = true end
         end
     end
-    if not self:layoutChanged() and home_data and self.home_data.recent
-            and sameHome(self, items, book, home_data) then
+    local reusable, row_books
+    if not self:layoutChanged() and home_data then reusable, row_books = sameHome(self, items, book, home_data) end
+    if reusable then
+        self:updateDetails(home_data)
         self.item_table, self.book, self.home_data = items, book, home_data
+        self.row_books = row_books
         self.header:refreshStatus()
         self:setSelection(index)
         return
@@ -798,6 +877,7 @@ function Home:dispose()
     self.body, self.header = nil, nil
     self.rows, self.focus_frames, self.row_books = nil, nil, nil
     self.focus_exclusions, self.cover_widgets, self.badge_widgets = nil, nil, nil
+    self.card_content, self.nav_details, self.display_options, self.stats_widget, self.last_read_text = nil, nil, nil, nil, nil
     self.item_table, self.book, self.home_data = nil, nil, nil
 end
 

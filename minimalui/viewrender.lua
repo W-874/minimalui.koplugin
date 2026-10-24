@@ -12,9 +12,11 @@ local LeftContainer = require("ui/widget/container/leftcontainer")
 local CenterContainer = require("ui/widget/container/centercontainer")
 local Menu = require("ui/widget/menu")
 local ReadCollection = require("readcollection")
-local Screen = require("device").screen
+local Device = require("device")
+local Screen = Device.screen
 local Size = require("ui/size")
 local TextWidget = require("ui/widget/textwidget")
+local TextBoxWidget = require("ui/widget/textboxwidget")
 local UIManager = require("ui/uimanager")
 local VerticalSpan = require("ui/widget/verticalspan")
 local _ = require("gettext")
@@ -26,6 +28,78 @@ local size_scale = Screen:scaleBySize(1000000) / 1000000
 local function face(size) return Font:getFace("cfont", size / size_scale) end
 local function single(s) return tostring(s or ""):gsub("[\r\n]+", " · ") end
 local function first(s) return (s or "?"):match("^[%z\1-\127\194-\244][\128-\191]*") or "?" end
+
+local function pageIndex(menu, index)
+    if menu.items_max_lines then
+        local page = menu.page_items and menu.page_items[menu.page]
+        return page and page[index]
+    end
+    return (menu.page - 1) * menu.perpage + index
+end
+
+local function selectByShortcut(menu, _, keyevent)
+    if not Device:hasKeyboard() then return true end
+    for index, key in ipairs(menu.item_shortcuts) do
+        if key == keyevent.key then
+            local entry_index = pageIndex(menu, index)
+            local entry = entry_index and menu.item_table[entry_index]
+            if entry and (menu.items_max_lines or index <= menu.perpage) then
+                entry.idx = entry_index
+                menu:onMenuSelect(entry)
+            end
+            break
+        end
+    end
+    return true
+end
+
+-- Native init/registerKeyEvents may replace the key table after configuring
+-- the renderer. Save displaced values only while someone still owns the table.
+function ViewRender.bindShortcuts(menu)
+    local state = menu._minimal_view_shortcuts
+    if not state then
+        state = {
+            flag = rawget(menu, "is_enable_shortcut"),
+            handler = rawget(menu, "onSelectByShortCut"),
+            bindings = setmetatable({}, { __mode = "k" }), hooks = {},
+            original_binding = menu.key_events and rawget(menu.key_events, "SelectByShortCut"),
+        }
+        menu._minimal_view_shortcuts = state
+        for _, name in ipairs({ "onPhysicalKeyboardConnected", "onPhysicalKeyboardDisconnected" }) do
+            local original, fallback = rawget(menu, name), menu[name]
+            local hook = { original = original }
+            -- A later plugin may retain this wrapper after release. Capture only
+            -- its hook/fallback, not the attachment's displaced key tables.
+            local wrapper = function(instance, ...)
+                local current = instance._minimal_view_shortcuts
+                if not current or current.hooks[name] ~= hook then
+                    if fallback then return fallback(instance, ...) end
+                    return
+                end
+                if fallback then fallback(instance, ...) end
+                local previous = current.enabled
+                ViewRender.bindShortcuts(instance)
+                if previous ~= current.enabled and instance.item_group then instance:updateItems() end
+            end
+            hook.wrapper = wrapper
+            state.hooks[name] = hook
+            menu[name] = wrapper
+        end
+    end
+    local keys = menu.key_events
+    if not keys then keys = {}; menu.key_events = keys end
+    if not state.bindings[keys] then
+        local binding = rawget(keys, "SelectByShortCut")
+        if binding == state.binding then binding = state.original_binding end
+        state.bindings[keys] = { value = binding }
+    end
+    local mode = menu._minimalui_view and menu._minimalui_view.mode
+    state.enabled = Device:hasKeyboard() and not (mode and mode:find("^mosaic"))
+    menu.is_enable_shortcut = state.enabled
+    state.binding = state.binding or { { menu.item_shortcuts } }
+    keys.SelectByShortCut = state.enabled and state.binding or nil
+    menu.onSelectByShortCut = selectByShortcut
+end
 
 function Item:textAt(text, size, bold, width, x, y, align, color)
     if not text or text == "" or width < 1 then return end
@@ -47,10 +121,12 @@ end
 function Item:init()
     self.filepath = self.entry.file or self.entry.path
     self.file_deleted = self.entry.dim
-    self.is_directory = not (self.entry.is_file or self.entry.file)
+    self.is_directory = not self.native and not (self.entry.is_file or self.entry.file)
     self.ges_events = {
         TapSelect = { GestureRange:new{ ges = "tap", range = self.dimen } },
-        HoldSelect = { GestureRange:new{ ges = "hold", range = self.dimen } },
+        HoldSelect = { GestureRange:new{
+            ges = self.menu.handle_hold_on_hold_release and "hold_release" or "hold", range = self.dimen,
+        } },
     }
     self:update()
 end
@@ -62,8 +138,17 @@ function Item:free() self:clear() end
 function Item:onCloseWidget() self:free() end
 function Item:onFocus() self.focused = true; return true end
 function Item:onUnfocus() self.focused = false; return true end
-function Item:onTapSelect() self.menu:onMenuSelect(self.entry); return true end
-function Item:onHoldSelect() self.menu:onMenuHold(self.entry); return true end
+function Item:getGesPosition(ges)
+    if not ges or not ges.pos then return nil end
+    return { x = (ges.pos.x - self.dimen.x) / self.dimen.w,
+        y = (ges.pos.y - self.dimen.y) / self.dimen.h }
+end
+function Item:onTapSelect(_, ges)
+    self.menu:onMenuSelect(self.entry, self:getGesPosition(ges)); return true
+end
+function Item:onHoldSelect(_, ges)
+    self.menu:onMenuHold(self.entry, self:getGesPosition(ges)); return true
+end
 
 local function progress(info, cached, manager)
     if manager and manager:getSetting("hide_page_info") then return "" end
@@ -117,7 +202,7 @@ function Item:update()
     local menu, state = self.menu, self.menu._minimalui_view or {}
     local manager = state.manager
     local cached, info = {}, {}
-    if not self.classic and not self.is_directory and self.filepath then
+    if not self.native and not self.classic and not self.is_directory and self.filepath then
         info = BookList.getBookInfo(self.filepath)
         if manager then
             local found = manager:getBookInfo(self.filepath, menu._do_cover_images)
@@ -141,6 +226,9 @@ function Item:update()
     local files = state.kind == "files"
     self.title = single((files or self.classic or self.is_directory) and Menu.getMenuText(self.entry)
         or (not cached.ignore_meta and cached.title) or Menu.getMenuText(self.entry))
+    if self.classic and not menu.single_line and (menu.items_max_lines or menu.multilines_forced) then
+        self.title = tostring(Menu.getMenuText(self.entry) or "")
+    end
     local authors = single(not cached.ignore_meta and cached.authors or "")
     if not files and not self.classic and cached.series then
         local series = cached.series .. (cached.series_index and " #" .. cached.series_index or "")
@@ -155,17 +243,46 @@ function Item:update()
     local reading = info.percent_finished and info.percent_finished > 0 and info.percent_finished < 1
         and info.status ~= "complete" and info.status ~= "abandoned"
     local w, h, pad = self.width, self.height, px(10)
+    local left = pad
+    if self.shortcut then
+        local size = math.min(px(26), math.max(1, h - px(8)))
+        local badge = menu:getItemShortCutIcon(Geom:new{ w = size, h = size }, self.shortcut, "square")
+        self.parts[#self.parts + 1] = { widget = badge, x = pad, y = math.floor((h - size) / 2) }
+        left = pad + size + px(8)
+    end
     if self.classic then
         local right = self.entry.mandatory_func and self.entry.mandatory_func() or self.entry.mandatory
         local size = px(menu.items_mandatory_font_size or menu.font_size - 4)
-        local r = self:textAt(right, size, false, w * 0.4, pad, 0, "right")
+        local dim = self.entry.dim
+        if self.entry.dim_func then dim = self.entry.dim_func() end
+        local mandatory_dim = self.entry.mandatory_dim
+        if mandatory_dim == nil then mandatory_dim = dim end
+        if self.entry.mandatory_dim_func then mandatory_dim = self.entry.mandatory_dim_func() end
+        local r = self:textAt(right, size, false, math.max(1, (w - left - pad) * 0.4), left, 0, "right",
+            mandatory_dim and BB.COLOR_DARK_GRAY or nil)
         local rw = r and r.w + px(12) or 0
         if r then self.parts[#self.parts].x = w - pad - r.w; self.parts[#self.parts].y = math.floor((h - r.h) / 2) end
         local bold = self.entry.bold == true or menu.item_table.current == self.entry.idx
-        local d = self:textAt(self.title, px(menu.font_size), bold, w - 2 * pad - rw, pad, 0,
-            nil, self.entry.dim and BB.COLOR_DARK_GRAY or nil)
-        if d then self.parts[#self.parts].y = math.floor((h - d.h) / 2) end
-        self.separator_x = pad
+        local color = dim and BB.COLOR_DARK_GRAY or nil
+        local available = w - left - pad - rw
+        local post = self:textAt(self.entry.post_text, size, bold, available * 0.5, left, 0, nil, color)
+        if post then
+            self.parts[#self.parts].x = w - pad - rw - post.w
+            self.parts[#self.parts].y = math.floor((h - post.h) / 2)
+            available = available - post.w - px(8)
+        end
+        if not menu.single_line and (menu.items_max_lines or menu.multilines_forced) then
+            local widget = TextBoxWidget:new{
+                text = self.title, face = face(px(menu.font_size)), bold = bold, fgcolor = color,
+                width = math.max(1, math.floor(available)), height = math.max(1, h - px(4)), height_adjust = true,
+                height_overflow_show_ellipsis = true,
+            }
+            self.parts[#self.parts + 1] = { widget = widget, x = left,
+                y = math.max(0, math.floor((h - widget:getSize().h) / 2)) }
+        else
+            local d = self:textAt(self.title, px(menu.font_size), bold, available, left, 0, nil, color)
+            if d then self.parts[#self.parts].y = math.floor((h - d.h) / 2) end
+        end
     elseif self.grid then
         local title_size = math.min(px(15), math.max(px(10), math.floor(w * 0.09)))
         local probe = TextWidget:new{ text = self.title, face = face(title_size), bold = true }
@@ -192,12 +309,12 @@ function Item:update()
         end
         self:textAt(self.title, title_size, true, w - px(8), px(4), h - bottom - th, "center")
     else
-        local left = pad
+        local cover_left = left
         if menu._do_cover_images then
             local ch = math.max(1, math.min(h - px(8), menu.cover_specs.max_cover_h + 2 * Size.border.thin))
             local cw = math.min(math.floor(ch * 0.7), menu.cover_specs.max_cover_w + 2 * Size.border.thin)
-            self:cover(cached, cw, ch, pad, math.floor((h - ch) / 2), false)
-            left = pad + cw + px(14)
+            self:cover(cached, cw, ch, cover_left, math.floor((h - ch) / 2), false)
+            left = cover_left + cw + px(14)
         end
         local right = ""
         if files then
@@ -267,6 +384,7 @@ end
 
 function ViewRender.build(menu)
     local state = menu._minimalui_view or {}
+    ViewRender.bindShortcuts(menu)
     local grid = state.mode and state.mode:find("^mosaic") ~= nil
     local classic = not state.mode
     local border = Size.border.thin
@@ -278,11 +396,11 @@ function ViewRender.build(menu)
             max_cover_h = grid and menu.item_height - 2 * border or menu.item_height - 2 - 2 * border,
         } or false
     end
-    local offset = (menu.page - 1) * menu.perpage
     local selected, row, line
-    local count = math.min(menu.perpage, #menu.item_table - offset)
+    local page = classic and menu.items_max_lines and menu.page_items and menu.page_items[menu.page]
+    local count = page and #page or math.min(menu.perpage, #menu.item_table - (menu.page - 1) * menu.perpage)
     for idx = 1, count do
-        local index = offset + idx
+        local index = page and page[idx] or (menu.page - 1) * menu.perpage + idx
         local entry = menu.item_table[index]; entry.idx = index
         if index == menu.itemnumber then selected = idx end
         if grid and (idx - 1) % menu.nb_cols == 0 then
@@ -296,9 +414,11 @@ function ViewRender.build(menu)
             row[#row + 1] = HorizontalSpan:new{ width = menu.item_margin }
         end
         local dimen = menu.item_dimen:copy()
+        if page then dimen.h = entry.height end
         local item = Item:new{
             menu = menu, entry = entry, dimen = dimen, width = dimen.w, height = dimen.h,
-            grid = grid, classic = classic, last = idx == count,
+            grid = grid, classic = classic, native = state.kind == "native", last = idx == count,
+            idx = index, shortcut = menu.is_enable_shortcut and menu.item_shortcuts[idx] or nil,
         }
         if grid then
             row[#row + 1] = item; row[#row + 1] = HorizontalSpan:new{ width = menu.item_margin }
@@ -308,7 +428,7 @@ function ViewRender.build(menu)
             if not classic then menu.item_group[#menu.item_group + 1] = VerticalSpan:new{ width = Size.line.thin } end
             menu.layout[#menu.layout + 1] = { item }
         end
-        if not classic and not item.bookinfo_found and not item.is_directory and not item.file_deleted then
+        if not item.native and not classic and not item.bookinfo_found and not item.is_directory and not item.file_deleted then
             menu.items_to_update[#menu.items_to_update + 1] = item
         end
     end
@@ -329,6 +449,7 @@ function ViewRender.updateCover(menu, selected, no_recalculate)
     menu.items_to_update = {}; menu._has_cover_images = false
     selected = ViewRender.build(menu) or selected
     menu:updatePageInfo(selected); menu:mergeTitleBarIntoLayout()
+    require("minimalui/viewfooter").apply(menu)
     menu.show_parent.dithered = menu._has_cover_images
     local manager = menu._minimalui_view.manager
     UIManager:setDirty(menu.show_parent, function()
@@ -347,20 +468,33 @@ function ViewRender.updateClassic(menu, selected, no_recalculate)
     require("minimalui/viewfocus").invalidate(menu)
     menu.layout = {}; menu.item_group:clear()
     menu.page_info:resetLayout(); menu.return_button:resetLayout(); menu.content_group:resetLayout()
+    ViewRender.bindShortcuts(menu)
     menu:_recalculateDimen(no_recalculate)
     selected = ViewRender.build(menu) or selected
     menu:updatePageInfo(selected); menu:mergeTitleBarIntoLayout()
+    require("minimalui/viewfooter").apply(menu)
     if menu.path_items then menu.path_items[menu.path] = (menu.page - 1) * menu.perpage + (selected or 1) end
     UIManager:setDirty(menu.show_parent or menu, function() return "ui", old and old:combine(menu.dimen) or menu.dimen end)
 end
 function ViewRender.attach(menu, options)
+    ViewRender.bindShortcuts(menu)
     require("minimalui/viewfocus").attach(menu)
     require("minimalui/viewfooter").apply(menu)
 end
 function ViewRender.release(menu)
     require("minimalui/viewjobs").cancel(menu, true)
     require("minimalui/viewfocus").release(menu)
-    require("minimalui/viewfooter").release(menu)
+    require("minimalui/viewfooter").release(menu, false)
+    local state = menu._minimal_view_shortcuts
+    if state then
+        for keys, saved in pairs(state.bindings) do keys.SelectByShortCut = saved.value end
+        menu.is_enable_shortcut = state.flag
+        if menu.onSelectByShortCut == selectByShortcut then menu.onSelectByShortCut = state.handler end
+        for name, hook in pairs(state.hooks) do
+            if rawget(menu, name) == hook.wrapper then menu[name] = hook.original end
+        end
+        menu._minimal_view_shortcuts = nil
+    end
 end
 ViewRender.Item = Item
 return ViewRender

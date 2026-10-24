@@ -73,6 +73,7 @@ function Header:_resolveText()
     elseif not self.folder_title then
         subtitle = self.subtitle
     end
+    if self.hide_subtitle then subtitle = nil end
     return title, subtitle ~= "" and subtitle or nil
 end
 
@@ -114,9 +115,9 @@ function Header:init()
             allow_flash = allow_flash == true,
         }
     end
-    self.menu_button = button("appbar.menu", function()
+    self.menu_button = button("chevron.up", function()
         if self.menu_callback then return self.menu_callback() end
-    end)
+    end, nil, 180)
     self.left_button = self.menu_button
     self.buttons = { self.menu_button }
     local left_items = { self.menu_button }
@@ -278,9 +279,7 @@ function Header:setRightIcon(icon)
     if self.icon_callback then return self.icon_callback("right", icon) end
 end
 function Header:generateVerticalLayout()
-    local rows = {}
-    for _, button in ipairs(self.buttons) do table.insert(rows, { button }) end
-    return rows
+    return {} -- The hardware Menu key owns this action; only touch uses the icon.
 end
 function Header:refreshStatus()
     if not self.status_widget then return end

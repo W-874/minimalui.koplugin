@@ -19,38 +19,43 @@ function Books.isFile(path)
     return type(path) == "string" and lfs.attributes(path, "mode") == "file"
 end
 
+local function collect(root, result)
+    local count, eligibility = 0, {}
+    for name in lfs.dir(root) do
+        if name:sub(1, 1) ~= "." then
+            local path = root .. "/" .. name
+            -- Cache extension eligibility only for this directory pass; a
+            -- newly registered native provider is visible on the next pass.
+            local suffix = (name:match("%..*$") or ""):lower()
+            local eligible = eligibility[suffix]
+            if eligible == nil then
+                eligible = not not DocumentRegistry:getProviders(path)
+                eligibility[suffix] = eligible
+            end
+            if eligible and lfs.symlinkattributes(path, "mode") == "file" then
+                count = count + 1
+                if result then result[#result + 1] = { path = path, title = name } end
+            end
+        end
+    end
+    return count
+end
+
 function Books.scan()
     local root, reason = Books.documentsDirectory()
     if not root then return nil, reason end
-    -- Provisional foundation only: one directory level, filename order.
-    -- Recursive scope, sorting and presentation remain product decisions.
-    local ok, books = pcall(function()
-        local result = {}
-        local eligibility = {}
-        for name in lfs.dir(root) do
-            if name:sub(1, 1) ~= "." then
-                local path = root .. "/" .. name
-                -- Keep every suffix component: .fb2.zip and .zip need not
-                -- have the same provider. The cache lasts only this scan, so
-                -- newly registered providers are visible on the next entry.
-                local suffix = (name:match("%..*$") or ""):lower()
-                local eligible = eligibility[suffix]
-                if eligible == nil then
-                    eligible = not not DocumentRegistry:getProviders(path)
-                    eligibility[suffix] = eligible
-                end
-                -- Do not expose directories, symlinks or auxiliary tools as books.
-                -- getProviders is extension-only; hasProvider can read sidecars.
-                if eligible and lfs.symlinkattributes(path, "mode") == "file" then
-                    result[#result + 1] = { path = path, title = name }
-                end
-            end
-        end
-        table.sort(result, function(a, b) return a.title < b.title end)
-        return result
-    end)
+    local result = {}
+    local ok = pcall(collect, root, result)
     if not ok then return nil, _("Unable to read the Kindle documents directory.") end
-    return books
+    table.sort(result, function(a, b) return a.title < b.title end)
+    return result
+end
+
+function Books.count()
+    local root = Books.documentsDirectory()
+    if not root then return 0 end
+    local ok, count = pcall(collect, root)
+    return ok and count or 0
 end
 
 return Books

@@ -219,6 +219,14 @@ function HomeSource.collect(ui, book, library_count, cache, statistics_cache)
         browser_path = ui and ui.file_chooser and ui.file_chooser.path or nil,
         options = opts,
     }
+    if opts.counts then
+        data.library_count = library_count
+        if data.library_count == nil then data.library_count = require("minimalui/books").count() end
+        local collection = require("readcollection")
+        local count = 0
+        for _ in pairs(collection.coll[collection.default_collection_name] or {}) do count = count + 1 end
+        data.favorites_count = count
+    end
     if book then readBook(book, opts.metadata, previous, current) end
     local seen = {}
     local need_featured_time = book ~= nil and opts.metadata

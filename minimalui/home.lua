@@ -196,8 +196,9 @@ end
 
 local function navDetail(data, id)
     if (data.options or {}).counts == false then return end
-    if id == "library" then return data.library_count ~= nil and tostring(data.library_count) or "documents" end
+    if id == "library" then return tostring(data.library_count or 0) end
     if id == "history" then return data.history_count ~= nil and tostring(data.history_count) or nil end
+    if id == "favorites" then return tostring(data.favorites_count or 0) end
     if id == "browser" and data.browser_path then return tostring(data.browser_path) end
 end
 

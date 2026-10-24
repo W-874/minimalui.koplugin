@@ -166,17 +166,18 @@ function NativeHeaders:adapt(widget, page, is_browser, show_context, opds_browse
         or (widget.item_group and widget.updateItems and { kind = "native", page = page, force_classic = true })
     local header = Header:new{
         width = widget.dimen.w, title = "KO/" .. page,
-        page = not is_browser and not opds_browser and page ~= "COLLECTIONS" and page or nil,
+        page = favorites and "FAVORITES" or (not is_browser and not opds_browser and page ~= "COLLECTIONS" and page or nil),
         title_prefix = opds_browser and "KO/" or nil,
-        inline_context = page == "COLLECTIONS",
+        inline_context = page == "COLLECTIONS" and not favorites,
+        hide_subtitle = favorites,
         native_title = old.title_widget and old.title_widget.text or old.title or widget.title,
-        subtitle = old.subtitle_widget and old.subtitle_widget.text or old.subtitle,
+        subtitle = not favorites and (old.subtitle_widget and old.subtitle_widget.text or old.subtitle) or nil,
         context_callback = is_browser and function()
             if ui.selected_files == nil then return nil end
             local count = 0
             for _ in pairs(ui.selected_files) do count = count + 1 end
             return T(_("Selected: %1"), count)
-        end or (not opds_browser and (show_context or page == "COLLECTIONS")) and context or nil,
+        end or (not favorites and not opds_browser and (show_context or page == "COLLECTIONS")) and context or nil,
         folder_title = is_browser and function() return ui.file_chooser.path end or nil,
         show_parent = is_browser and ui or widget,
         menu_callback = function() return controller:showNativeMenu() end,
@@ -472,8 +473,9 @@ function NativeHeaders:watch(instance, method, page, field, show_context, scan, 
             return unpack(result, first, result.n)
         end
         if field then owner:adapt(target[field], page, false, show_context, opds_browser) end
-        if page == "HISTORY" and owner.controller.view == "home" and owner.controller.screen then
-            owner.controller.library_count = nil -- native history can delete documents
+        if (page == "HISTORY" or page == "COLLECTIONS")
+                and owner.controller.view == "home" and owner.controller.screen then
+            owner.controller.library_count = nil -- native actions can delete documents
             require("minimalui/libraryactions").queueRefresh(owner.controller.screen)
         end
         if scan then

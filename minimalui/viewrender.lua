@@ -283,6 +283,7 @@ function Item:update()
             local d = self:textAt(self.title, px(menu.font_size), bold, available, left, 0, nil, color)
             if d then self.parts[#self.parts].y = math.floor((h - d.h) / 2) end
         end
+        self.separator_x = left
     elseif self.grid then
         local title_size = math.min(px(15), math.max(px(10), math.floor(w * 0.09)))
         local probe = TextWidget:new{ text = self.title, face = face(title_size), bold = true }
@@ -377,7 +378,7 @@ function Item:paintTo(bb, x, y)
     end
     if self.separator_x and not self.last then
         bb:paintRect(x + self.separator_x, y + self.height - Size.line.thin,
-            self.width - self.separator_x - px(10), Size.line.thin, self.menu.line_color or BB.COLOR_DARK_GRAY)
+            self.width - self.separator_x - px(10), Size.line.thin, BB.COLOR_DARK_GRAY)
     end
     self:paintFocus(bb)
 end

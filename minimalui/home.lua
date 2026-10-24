@@ -219,7 +219,18 @@ function Home:init()
     self.home_data = self.home_data or {}
     self.selected = math.max(1, math.min(self.selected or 1, #self.item_table))
     self:bindKeys()
-    self[1] = self:buildView()
+    local ok, view = pcall(self.buildView, self)
+    if not ok then
+        Cover.clear()
+        -- take() has transferred ownership already. A failed constructor must
+        -- release both adopted and newly loaded buffers, then keep the error.
+        for _, entry in pairs(self:detachCovers() or {}) do
+            if entry.bb then pcall(entry.bb.free, entry.bb) end
+        end
+        pcall(self.dispose, self)
+        error(view, 0)
+    end
+    self[1] = view
     self.ges_events = {}
     if self.touch then
         self.ges_events.MinimalTap = { GestureRange:new{ ges = "tap", range = self.dimen } }
@@ -262,10 +273,27 @@ end
 local function coverKey(path, height, width)
     return path and table.concat({ path, height, width }, "\0")
 end
+-- Detach only owned raster buffers; the soon-to-be-disposed ImageWidgets
+-- merely borrow them (image_disposable=false).
+function Home:detachCovers()
+    local entries = self.cover_cache
+    self.cover_cache = nil
+    self.cover_bb = nil
+    return entries
+end
+
 
 -- Prune before loading: at most the current book and three visible recent covers
 -- are owned, even while changing pages or rotating. Failed loads are cached too.
 function Home:prepareCovers(requests)
+    if not self.covers_prepared then
+        self.covers_prepared = true
+        self.cover_cache = Cover.take()
+        for _, entry in pairs(self.cover_cache) do
+            local signature = Cover.signature(entry.path)
+            if not signature or signature ~= entry.signature then entry.invalid = true end
+        end
+    end
     local wanted = {}
     for _, request in ipairs(requests) do
         wanted[coverKey(request.path, request.height, request.width)] = true

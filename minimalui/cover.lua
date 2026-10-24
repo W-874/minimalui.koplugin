@@ -10,9 +10,52 @@ local logger = require("logger")
 local lfs = require("libs/libkoreader-lfs")
 
 local Cover = {}
+local retained
+local reader_font = require("document/credocument").default_font
 
 local function freeBB(bb)
     if bb and bb.free then pcall(bb.free, bb) end
+end
+
+-- A single Reader handoff, never a document/widget cache. Each operation
+-- transfers ownership; callers must detach Home's entries before keeping them.
+function Cover.clear(path)
+    local entries = retained
+    if not entries then return end
+    for key, entry in pairs(entries) do
+        if path == nil or entry.path == path then
+            entries[key] = nil
+            freeBB(entry.bb)
+        end
+    end
+    if next(entries) == nil then retained = nil end
+end
+
+function Cover.keep(entries)
+    Cover.clear()
+    local kept, count = {}, 0
+    for key, entry in pairs(entries or {}) do
+        entries[key] = nil
+        if count < 4 and entry.bb and entry.signature and not entry.invalid then
+            kept[key] = { path = entry.path, signature = entry.signature, bb = entry.bb }
+            count = count + 1
+        else
+            freeBB(entry.bb)
+        end
+    end
+    retained = count > 0 and kept or nil
+end
+
+function Cover.take()
+    local entries = retained
+    retained = nil
+    return entries or {}
+end
+
+-- CRE's preferred font bias is global, including SVG image rendering. Record
+-- only its last live Reader value, never the Reader or its document.
+function Cover.noteReaderFont(face)
+    if type(face) == "string" and face ~= "" then reader_font = face end
 end
 
 -- Opens `file` through the registry, reads its cover page image and always closes the
@@ -77,7 +120,8 @@ end
 
 local function customCoverFile(path)
     local ok, file = pcall(DocSettings.findCustomCoverFile, DocSettings, path)
-    if ok and type(file) == "string" and file ~= "" then return file end
+    if ok and type(file) == "string" and file ~= "" then return file, true end
+    return nil, ok
 end
 
 -- Retained Home buffers are reusable only while their source and raster context
@@ -85,25 +129,39 @@ end
 function Cover.resolve(path)
     -- A cold card needs both the signature and the selected source. Resolve
     -- custom-cover directories once and pass this short-lived result to load.
-    local resolved = { path = path, custom = customCoverFile(path) }
+    local custom, found = customCoverFile(path)
+    local resolved = { path = path, custom = custom }
+    if not found then return resolved end
     local ok, signature = pcall(function()
         local custom = resolved.custom
         local source = custom or path
         local attr = lfs.attributes(source)
         local book = custom and lfs.attributes(path) or attr
         if not attr or attr.mode ~= "file" or not book or book.mode ~= "file" then return end
-        -- getProvider() opens per-file settings. Fingerprint its input instead.
-        local sidecar = DocSettings:findSidecarFile(source)
-        local settings = sidecar and lfs.attributes(sidecar)
-        local providers = G_reader_settings:readSetting("provider")
-        local suffix = source:match("%.([^.]+)$")
-        local provider = type(providers) == "table" and suffix and providers[suffix:lower()]
+        -- Resolve the actual saved provider, not the sidecar's modification
+        -- time: ordinary progress/annotation saves do not change cover pixels.
+        local provider = DocumentRegistry:getProvider(source)
+        local fallback = custom and DocumentRegistry:getProvider(path) or provider
+        if not provider or not fallback then return end
+        -- Loading the module does not initialize the engine/font list or open
+        -- a document. Its gamma getter observes native global image state.
+        local cre = require("libs/libkoreader-cre")
+        local family = G_reader_settings:readSetting("cre_font_family_fonts") or {}
         return table.concat({
             source, tostring(attr.size), tostring(attr.modification), tostring(attr.change),
             tostring(attr.ino), tostring(attr.dev), tostring(book.size), tostring(book.modification),
-            tostring(sidecar), tostring(settings and settings.size),
-            tostring(settings and settings.modification), tostring(settings and settings.change),
-            tostring(settings and settings.ino), tostring(provider),
+            tostring(book.change), tostring(book.ino), tostring(book.dev),
+            tostring(provider.provider), tostring(fallback.provider),
+            tostring(reader_font), tostring(cre.getGammaIndex()),
+            tostring(G_reader_settings:readSetting("monospace_font")),
+            tostring(G_reader_settings:readSetting("fallback_font")),
+            tostring(G_reader_settings:readSetting("additional_fallback_fonts")),
+            tostring(G_reader_settings:readSetting("cre_adjusted_fallback_font_sizes")),
+            tostring(G_reader_settings:readSetting("cre_monospace_scaling")),
+            tostring(G_reader_settings:readSetting("cre_font_family_ignore_font_names")),
+            tostring(family.serif), tostring(family["sans-serif"]), tostring(family.cursive),
+            tostring(family.fantasy), tostring(family.monospace), tostring(family.math),
+            tostring(family.emoji), tostring(family.fangsong),
             tostring(CanvasContext.is_color_rendering_enabled),
             tostring(CanvasContext:getWidth()), tostring(CanvasContext:getHeight()),
             tostring(G_defaults:readSetting("DKOPTREADER_CONFIG_TEXT_WRAP")),

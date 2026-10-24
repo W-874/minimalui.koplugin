@@ -2,6 +2,7 @@
 -- Minimal UI plugin; install the repository as minimalui.koplugin.
 local Books = require("minimalui/books")
 local ConfirmBox = require("ui/widget/confirmbox")
+local Cover = require("minimalui/cover")
 local Device = require("device")
 local FileManager = require("apps/filemanager/filemanager")
 local Home = require("minimalui/home")
@@ -51,6 +52,7 @@ end
 
 function MinimalUI:init()
     self.closed = false
+    if not self:isEnabled() then Cover.clear() end
     if self.ui.document then
         self.reader_bridge = ReaderBridge:new{ controller = self }
         self.native_headers = NativeHeaders:new{ controller = self }
@@ -58,6 +60,7 @@ function MinimalUI:init()
             ViewSettings.install(self)
             self.reader_bridge:install()
             self.native_headers:apply(false)
+            self:bindMetadataEvents()
         end
         return
     end
@@ -83,8 +86,12 @@ function MinimalUI:init()
             -- startup dialogs or revive a FileManager already closed for reading.
             if self:isEnabled() and self:isLive()
                     and UIManager:getTopmostVisibleWidget() == self.ui then
-                if destination == "library" then self:showLibrary() else self:showHome() end
+                if destination == "library" then
+                    Cover.clear()
+                    self:showLibrary()
+                else self:showHome() end
             end
+            if not self.screen then Cover.clear() end
             -- A startup dialog may keep Home from opening. Adapt the browser
             -- beneath it now so dismissing that dialog cannot expose native UI.
             if self:isEnabled() and self:isLive() and not self.screen then
@@ -411,6 +418,7 @@ end
 
 function MinimalUI:onShowingReader()
     if self.screen then self.ui:onSetupShowReader() end
+    if self.home_screen then Cover.keep(self.home_screen:detachCovers()) end
     self:releaseScreens()
     -- Do not consume this broadcast: the native host still needs to close.
 end
@@ -432,10 +440,13 @@ end
 
 -- The native plugin manager calls stopPlugin before disabling (restart still
 -- controls plugin loading). Use the same idempotent teardown as the host.
-MinimalUI.stopPlugin = MinimalUI.onCloseWidget
+function MinimalUI:stopPlugin()
+    Cover.clear()
+    return self:onCloseWidget()
+end
 
 function MinimalUI:bindMetadataEvents()
-    if self.metadata_hook or self.ui.document or not self:isEnabled() then return end
+    if self.metadata_hook or not self:isEnabled() then return end
     local original, fallback = rawget(self.ui, "handleEvent"), self.ui.handleEvent
     local handler = function(widget, event, ...)
         if not self.closed and (event.handler == "onInvalidateMetadataCache"
@@ -443,6 +454,8 @@ function MinimalUI:bindMetadataEvents()
             -- CoverBrowser can consume metadata events before this plugin.
             -- The active Home receives broadcasts itself; only forward parked.
             self.home_source_cache = nil
+            local path = event.args and event.args[1]
+            Cover.clear(type(path) == "string" and path or nil)
             local home = self.home_screen
             if home and home ~= self.screen then
                 home[event.handler](home, unpack(event.args, 1, event.args.n))
@@ -462,14 +475,18 @@ function MinimalUI:restoreMetadataEvents()
     self.metadata_hook = nil
 end
 
-function MinimalUI:onInvalidateMetadataCache()
+function MinimalUI:onInvalidateMetadataCache(path)
     self.home_source_cache = nil
+    Cover.clear(type(path) == "string" and path or nil)
 end
 
 MinimalUI.onBookMetadataChanged = MinimalUI.onInvalidateMetadataCache
 
 function MinimalUI:onSaveSettings()
-    if self.ui.document and self:isEnabled() then require("minimalui/homesource").capture(self.ui) end
+    if self.ui.document and self:isEnabled() then
+        Cover.noteReaderFont(self.ui.font and self.ui.font.font_face)
+        require("minimalui/homesource").capture(self.ui)
+    end
 end
 
 -- Native Reader closes its document before the dialog's final FlushSettings.
@@ -519,6 +536,7 @@ function MinimalUI:addToMainMenu(menu_items)
                         self:startClock()
                         if open_home then self:showHome() end
                     else
+                        Cover.clear()
                         ViewSettings.restore(self)
                         self:stopClock()
                         self:restoreBrowserNavigation()

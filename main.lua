@@ -37,8 +37,9 @@ function MinimalUI:isEnabled()
 end
 
 function MinimalUI:isLive()
-    return not self.closed and not self.ui.tearing_down
-        and FileManager.instance == self.ui and UIManager:isWidgetShown(self.ui)
+    local reader = self.ui.document and package.loaded["apps/reader/readerui"]
+    local current = reader and reader.instance == self.ui or FileManager.instance == self.ui
+    return not self.closed and not self.ui.tearing_down and current and UIManager:isWidgetShown(self.ui)
 end
 
 function MinimalUI:canShowView()
@@ -52,9 +53,11 @@ function MinimalUI:init()
     self.closed = false
     if self.ui.document then
         self.reader_bridge = ReaderBridge:new{ controller = self }
+        self.native_headers = NativeHeaders:new{ controller = self }
         if self:isEnabled() then
             ViewSettings.install(self)
             self.reader_bridge:install()
+            self.native_headers:apply(false)
         end
         return
     end

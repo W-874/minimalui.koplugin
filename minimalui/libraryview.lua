@@ -41,7 +41,6 @@ function LibraryView.apply(screen)
             ViewRender.updateClassic(target, ...)
             ViewSettings.remember(target)
         end
-        ViewRender.attach(screen, { kind = "books", page = "LIBRARY" })
         return
     end
 
@@ -55,7 +54,6 @@ function LibraryView.apply(screen)
     screen._recalculateDimen = current.renderer._recalculateDimen
     screen._updateItemsBuildUI = function(target) return ViewRender.build(target) end
     screen._library_covermenu = current.covermenu
-    ViewRender.attach(screen, { kind = "books", page = "LIBRARY" })
 end
 
 function LibraryView.remember(screen)

@@ -147,44 +147,28 @@ function NativeHeaders:refreshFiles()
     local header = record.header
     local height = header:getHeight()
     header:setSubTitle(header.subtitle)
-    header:setRightIcon(ui.selected_files ~= nil and "check" or "plus")
+    ViewFooter.apply(record.widget, record.footer_context)
     if height ~= header:getHeight() then relayout(record.widget) end
 end
 
 function NativeHeaders:adapt(widget, page, is_browser, show_context, opds_browser)
     if not widget or not widget.title_bar or widget._minimal_header then return end
     local controller, old = self.controller, widget.title_bar
-    local ui, extra = controller.ui, {}
+    local ui = controller.ui
     local collections = ui.collections
     local collection_list = collections and widget == collections.coll_list
         and collections.selected_collections == nil
     local favorites = page == "COLLECTIONS" and collections
         and widget == collections.booklist_menu and widget.path == ReadCollection.default_collection_name
-    if is_browser then
-        extra[#extra + 1] = {
-            icon = ui.selected_files ~= nil and "check" or "plus", role = "left",
-            callback = function() return ui:onShowPlusMenu() end,
-        }
-    else
-        if old.left_icon then
-            extra[#extra + 1] = {
-                icon = (page == "HISTORY" or opds_browser) and "plus" or old.left_icon,
-                role = "left", callback = old.left_icon_tap_callback,
-                hold_callback = old.left_icon_hold_callback,
-            }
-        end
-        if page ~= "HISTORY" and not opds_browser and (old.right_icon or old.close_callback) then
-            extra[#extra + 1] = {
-                icon = old.close_callback and "close" or old.right_icon, role = "right",
-                callback = old.close_callback or old.right_icon_tap_callback,
-                hold_callback = old.close_hold_callback or old.right_icon_hold_callback,
-            }
-        end
-    end
+    local book_view = is_browser or page == "HISTORY" or page == "SEARCH"
+        or (page == "COLLECTIONS" and collections and widget == collections.booklist_menu)
+    local view_options = book_view and { kind = is_browser and "files" or "books", page = page }
+        or (widget.item_group and widget.updateItems and { kind = "native", page = page, force_classic = true })
     local header = Header:new{
         width = widget.dimen.w, title = "KO/" .. page,
-        page = not is_browser and not opds_browser and page or nil,
+        page = not is_browser and not opds_browser and page ~= "COLLECTIONS" and page or nil,
         title_prefix = opds_browser and "KO/" or nil,
+        inline_context = page == "COLLECTIONS",
         native_title = old.title_widget and old.title_widget.text or old.title or widget.title,
         subtitle = old.subtitle_widget and old.subtitle_widget.text or old.subtitle,
         context_callback = is_browser and function()
@@ -192,37 +176,15 @@ function NativeHeaders:adapt(widget, page, is_browser, show_context, opds_browse
             local count = 0
             for _ in pairs(ui.selected_files) do count = count + 1 end
             return T(_("Selected: %1"), count)
-        end or (not opds_browser and show_context) and context or nil,
+        end or (not opds_browser and (show_context or page == "COLLECTIONS")) and context or nil,
         folder_title = is_browser and function() return ui.file_chooser.path end or nil,
         show_parent = is_browser and ui or widget,
         menu_callback = function() return controller:showNativeMenu() end,
-        navigation_icon = opds_browser and "close" or nil,
-        -- Submission selectors are intentionally never passed to adapt().
-        home_callback = function()
-            if not controller:isLive() then return true end
-            if opds_browser then
-                local close = widget.close_callback or old.close_callback
-                if close then return close() end
-                return true
-            end
-            if is_browser then return ui:onHome() end
-            return self:goHome()
-        end,
-        home_hold_callback = is_browser and old.left_icon_hold_callback or nil,
-        extra_buttons = extra,
     }
-    if favorites then
-        -- Keep the COLLECTIONS settings profile; only this collection's visible
-        -- page name and native Return destination differ from custom lists.
-        header.fixed_title = "KO/FAVORITES"
-        header:setTitle(header.native_title, true)
-    end
     local record = {
         widget = widget, old = old, header = header, custom = widget.custom_title_bar,
         is_browser = is_browser,
-        view_options = (is_browser or page == "HISTORY" or page == "SEARCH"
-            or (page == "COLLECTIONS" and ui.collections and widget == ui.collections.booklist_menu))
-            and { kind = is_browser and "files" or "books", page = page } or nil,
+        view_options = view_options,
         hooks = {}, shortcut = rawget(widget, "is_enable_shortcut"),
         build_ui = rawget(widget, "_updateItemsBuildUI"),
         key_events = widget.key_events, ges_events = widget.ges_events,
@@ -231,6 +193,51 @@ function NativeHeaders:adapt(widget, page, is_browser, show_context, opds_browse
     widget._minimal_header = record
     widget.title_bar, widget.custom_title_bar = header, header
     replace(widget, old, header)
+    record.action_icon = is_browser and "plus" or old.left_icon
+    record.footer_context = {
+        return_visible = opds_browser and function()
+            return #(widget.paths or {}) > 0 or #(widget.item_table_stack or {}) > 0
+        end or nil,
+        navigation_icon = (opds_browser or ui.document) and "close" or "home",
+        navigation_callback = function()
+            if not controller:isLive() then return true end
+            if opds_browser or ui.document then
+                if widget.onCloseAllMenus then return widget:onCloseAllMenus() end
+                return widget:onClose()
+            end
+            if is_browser then return ui:onHome() end
+            return self:goHome()
+        end,
+        navigation_hold_callback = is_browser and old.left_icon_hold_callback or nil,
+        action_icon = function()
+            if is_browser then return ui.selected_files ~= nil and "check" or "plus" end
+            if not record.action_icon then return nil end
+            local manager = widget._manager
+            if widget.select_count ~= nil or widget.selected_files ~= nil
+                    or (manager and manager.selected_files ~= nil)
+                    or (collections and widget == collections.coll_list and collections.selected_collections ~= nil) then
+                return "check"
+            end
+            return record.action_icon
+        end,
+        action_callback = (is_browser or old.left_icon) and function()
+            if is_browser then return ui:onShowPlusMenu() end
+            if widget.onLeftButtonTap then return widget:onLeftButtonTap() end
+            if old.left_icon_tap_callback then return old.left_icon_tap_callback() end
+        end or nil,
+        action_hold_callback = old.left_icon_hold_callback and function()
+            if widget.onLeftButtonHold then return widget:onLeftButtonHold() end
+            return old.left_icon_hold_callback()
+        end or nil,
+    }
+    header.icon_callback = function(side, icon)
+        if is_browser and side == "right" then icon = icon == "folder" and "plus" or icon end
+        record.action_icon = icon
+        ViewFooter.apply(widget, record.footer_context)
+        ViewFocus.invalidate(widget)
+    end
+    ViewFooter.apply(widget, record.footer_context)
+    header.left_button = widget._minimal_view_footer and widget._minimal_view_footer.action_button or header.menu_button
     if favorites then
         self:hook(record.hooks, widget, "onReturn", function(_, _, target)
             target.close_callback()
@@ -272,8 +279,7 @@ function NativeHeaders:adapt(widget, page, is_browser, show_context, opds_browse
         end)
     end
     if not record.view_options then
-        -- Details/OPDS keep native focus and painting; only their opaque root
-        -- background uses the same exact packed fill as managed book views.
+        -- Non-list details retain native painting with exact packed backgrounds.
         self:hook(record.hooks, widget, "paintTo", function(_, fallback, target, bb, x, y)
             syncPaintRoot(record, "paint_frame", target[1])
             return fallback(target, bb, x, y)
@@ -289,40 +295,32 @@ function NativeHeaders:adapt(widget, page, is_browser, show_context, opds_browse
             return fallback(target, bb, x, y)
         end)
     end
-    if page == "HISTORY" or opds_browser then
-        self:hook(record.hooks, header, "setLeftIcon", function(_, fallback, target, icon)
-            return fallback(target, icon == "appbar.menu" and "plus" or icon)
-        end)
-    end
     if opds_browser then
-        -- Native catalog/download menus anchor to left_button. The navigation
-        -- slot is Exit, not the menu that opened the anchored dialog.
-        header.left_button = header.left_extra_button or header.menu_button
+        -- Native catalog dialogs anchor to the relocated action button.
         if widget == opds_browser then
             self:watch(widget, "showDownloadList", "OPDS", "download_list", true, false, record.hooks)
             self:watch(widget, "showFacetLinkList", "OPDS", nil, true, true, record.hooks)
         end
     end
-    -- OPDS retains native hardware-keyboard shortcuts and their visible labels.
-    if not opds_browser then widget.is_enable_shortcut = false end
+    widget.is_enable_shortcut = Device:hasKeyboard()
     local keys = {}
     for name, binding in pairs(widget.key_events or {}) do keys[name] = binding end
     keys.LeftButtonTap = nil
-    if not opds_browser then keys.SelectByShortCut = nil end
+    keys.SelectByShortCut = nil -- renderer installs the per-page keyboard binding
     keys.MinimalNativeMenu = { { "Menu" } }
     widget.key_events, record.keys = keys, keys
     self:hook(record.hooks, widget, "onMinimalNativeMenu", function(owner)
         return owner.controller:showNativeMenu()
     end)
     self:hook(record.hooks, widget, "onHome", function(owner)
-        if opds_browser then return header.home_callback() end
+        if opds_browser or ui.document then return record.footer_context.navigation_callback() end
         return owner:goHome()
     end)
     if widget.registerKeyEvents then
         self:hook(record.hooks, widget, "registerKeyEvents", function(_, fallback, target, ...)
             if fallback then fallback(target, ...) end
             target.key_events.LeftButtonTap = nil
-            if not opds_browser then target.key_events.SelectByShortCut = nil end
+            ViewRender.bindShortcuts(target)
             target.key_events.MinimalNativeMenu = { { "Menu" } }
             record.keys = target.key_events
         end)
@@ -350,27 +348,14 @@ function NativeHeaders:adapt(widget, page, is_browser, show_context, opds_browse
         if fallback then return fallback(target, arg, ges) end
     end)
     if widget.item_group and widget.updateItems then
-        if record.view_options then
-            ViewSettings.configure(widget, ui, record.view_options)
-            record.builder = ViewRender.build
-            ViewRender.attach(widget, record.view_options)
-        else
-            record.builder = Header.listBuilder(record.build_ui)
-            ViewFooter.apply(widget)
-        end
+        ViewSettings.configure(widget, ui, record.view_options)
+        record.builder = ViewRender.build
+        ViewRender.attach(widget, record.view_options)
         widget._updateItemsBuildUI = record.builder
         -- Native Sym/ScreenKB devices skip titlebar focus because Menu used to
         -- activate the left icon. Menu now means Settings, so expose every icon.
         self:hook(record.hooks, widget, "mergeTitleBarIntoLayout", function(_, _, target)
             NativeHeaders.mergeTitleBarIntoLayout(target)
-        end)
-        self:hook(record.hooks, widget, "updatePageInfo", function(_, fallback, target, ...)
-            -- Native treats itemnumber as a one-shot visible-focus request.
-            -- Set it only after the renderer chose its row, so neither paging
-            -- nor native selection restoration is redirected to the first book.
-            if not target.itemnumber and #target.item_table > 0
-                    and Device:hasDPad() and not Device:isTouchDevice() then target.itemnumber = 1 end
-            return fallback(target, ...)
         end)
         local own_update = rawget(widget, "updateItems")
         self:hook(record.hooks, widget, "updateItems", function(_, fallback, target, selected, no_recalculate_dimen)
@@ -383,13 +368,14 @@ function NativeHeaders:adapt(widget, page, is_browser, show_context, opds_browse
             end
             if record.view_options then
                 local state, settings_changed = ViewSettings.configure(target, ui, record.view_options)
+                ViewFooter.apply(target, record.footer_context)
                 if settings_changed then no_recalculate_dimen = false end
                 target._updateItemsBuildUI = record.builder
                 ViewFocus.invalidate(target)
                 fallback = state.mode and ViewRender.updateCover or ViewRender.updateClassic
             end
             local result = pack(fallback(target, selected, no_recalculate_dimen))
-            ViewFooter.apply(target)
+            ViewFooter.apply(target, record.footer_context)
             NativeHeaders.mergeTitleBarIntoLayout(target)
             if record.view_options then ViewSettings.remember(target) end
             return unpack(result, 1, result.n)
@@ -415,7 +401,8 @@ function NativeHeaders:adapt(widget, page, is_browser, show_context, opds_browse
             owner:adapt(target, page, false, show_context)
             return unpack(result, 1, result.n)
         end)
-        ViewFooter.apply(widget)
+        ViewFooter.apply(widget, record.footer_context)
+        ViewFocus.attach(widget)
         layoutDetails(widget, header)
     end
     if opds_browser then
@@ -431,14 +418,11 @@ function NativeHeaders:adapt(widget, page, is_browser, show_context, opds_browse
     self:hook(record.hooks, widget, "onCloseWidget", function(owner, fallback, target, ...)
         local state = target._minimalui_view
         owner:release(record, false)
-        if state then return require("minimalui/viewjobs").close(target, state.close_manager) end
+        if state and state.kind ~= "native" then return require("minimalui/viewjobs").close(target, state.close_manager) end
         if fallback then return fallback(target, ...) end
     end)
     if is_browser then
         ui.title_bar = header
-        self:hook(record.hooks, header, "setRightIcon", function(_, _, target, icon)
-            return target:setLeftIcon(icon == "folder" and "plus" or icon)
-        end)
         ui:updateTitleBarPath()
     end
     if collection_list then
@@ -487,9 +471,7 @@ function NativeHeaders:watch(instance, method, page, field, show_context, scan, 
         if page == "BOOKMARKS" and target.ui and target.ui ~= owner.controller.ui then
             return unpack(result, first, result.n)
         end
-        if field and not (field == "coll_list" and target.selected_collections ~= nil) then
-            owner:adapt(target[field], page, false, show_context, opds_browser)
-        end
+        if field then owner:adapt(target[field], page, false, show_context, opds_browser) end
         if page == "HISTORY" and owner.controller.view == "home" and owner.controller.screen then
             owner.controller.library_count = nil -- native history can delete documents
             require("minimalui/libraryactions").queueRefresh(owner.controller.screen)
@@ -532,11 +514,40 @@ function NativeHeaders:watchCollectionItems(instance)
     self:hook(self.creators, instance, "updateCollListItemTable", function(owner, fallback, target, ...)
         -- onShowCollList creates Menu before population, as do its native
         -- rebuild paths. Install the instance filter before the first switch.
-        if target.selected_collections == nil then
-            owner:adapt(target.coll_list, "COLLECTIONS", false)
-        end
+        owner:adapt(target.coll_list, "COLLECTIONS", false)
         return fallback(target, ...)
     end)
+    if instance.sortCollections then
+        self:hook(self.creators, instance, "sortCollections", function(owner, fallback, target, ...)
+            local favorite = ReadCollection.default_collection_name
+            local settings = ReadCollection.coll_settings[favorite]
+            local position = 1
+            for name, value in pairs(ReadCollection.coll_settings) do
+                if name ~= favorite and value.order < settings.order then position = position + 1 end
+            end
+            local result = pack(fallback(target, ...))
+            local sorter = UIManager:getTopmostVisibleWidget()
+            if getmetatable(sorter) == require("ui/widget/sortwidget") then
+                local callback = sorter.callback
+                -- The dialog sorts only visible collections. Include the hidden
+                -- native entry solely when committing the complete native order.
+                sorter.callback = function(dialog, ...)
+                    local visible, ordered, index = dialog.item_table, {}, 1
+                    for i = 1, #visible + 1 do
+                        if i == math.min(position, #visible + 1) then
+                            ordered[i] = { name = favorite }
+                        else ordered[i], index = visible[index], index + 1 end
+                    end
+                    dialog.item_table = ordered
+                    local saved = pack(pcall(callback, dialog, ...))
+                    dialog.item_table = visible
+                    if not saved[1] then error(saved[2], 0) end
+                    return unpack(saved, 2, saved.n)
+                end
+            end
+            return unpack(result, 1, result.n)
+        end)
+    end
 end
 
 function NativeHeaders:watchBookmarks()
@@ -549,12 +560,27 @@ function NativeHeaders:watchBookmarks()
     if browser.ui == self.controller.ui then self:adapt(browser.bm_list, "BOOKMARKS", false, true) end
 end
 
+function NativeHeaders:watchReaderBookmarks()
+    local bookmark = self.controller.ui.bookmark
+    if not bookmark or not bookmark.updateBookmarkList then return end
+    for _, hook in ipairs(self.creators) do
+        if hook.target == bookmark and hook.name == "updateBookmarkList" then return end
+    end
+    self:hook(self.creators, bookmark, "updateBookmarkList", function(owner, fallback, target, ...)
+        local parent = target.bookmark_menu
+        if parent then owner:adapt(parent[1], "BOOKMARKS", false, true) end
+        return fallback(target, ...)
+    end)
+    local parent = bookmark.bookmark_menu
+    if parent and UIManager:isWidgetShown(parent) then self:adapt(parent[1], "BOOKMARKS", false, true) end
+end
+
 function NativeHeaders:release(record, refresh)
     local widget, header = record.widget, record.header
     -- KeyValuePage installs its footer wrappers after the header's init and
     -- population hooks. Remove that outer layer first, so restoreHooks can
     -- restore the actual original instance methods, not leave inert wrappers.
-    if record.details then ViewFooter.release(widget) end
+    if record.details then ViewFooter.release(widget, false) end
     restoreHooks(record.hooks)
     syncPaintRoot(record, "paint_frame", nil)
     syncPaintRoot(record, "host_paint_frame", nil)
@@ -562,7 +588,7 @@ function NativeHeaders:release(record, refresh)
     ViewSettings.release(widget)
     if widget._minimal_header == record then
         if widget._updateItemsBuildUI == record.builder then widget._updateItemsBuildUI = record.build_ui end
-        if widget.is_enable_shortcut == false then widget.is_enable_shortcut = record.shortcut end
+        widget.is_enable_shortcut = record.shortcut
         if widget.key_events == record.keys then widget.key_events = record.key_events end
         if widget.ges_events == record.gestures then widget.ges_events = record.ges_events end
         if widget.title_bar == header then widget.title_bar = record.old end
@@ -618,6 +644,9 @@ function NativeHeaders:apply(include_files)
     local ui = self.controller.ui
     if not ui then return end
     self:prune()
+    if ui.document then
+        self:watchReaderBookmarks()
+    end
     -- Watchers remain live while Home/Library covers the native FileChooser.
     -- Only its header/row adaptation waits until Files is about to be exposed.
     if include_files ~= false then self:adapt(ui.file_chooser, "FILES", true) end
@@ -652,11 +681,12 @@ function NativeHeaders:apply(include_files)
             self:adapt(entry[1][entry[2]], entry[3], false, entry[4])
         end
     end
-    if ui.collections and ui.collections.selected_collections == nil and ui.collections.coll_list
+    if ui.collections and ui.collections.coll_list
             and UIManager:isWidgetShown(ui.collections.coll_list) then
         self:adapt(ui.collections.coll_list, "COLLECTIONS", false)
     end
     self:watchBookmarks()
+    if ui.document then return end -- Files selection hooks belong only to FileManager.
     -- Selection changes without a path change (including the empty table on
     -- entry) must update immediately; native item rebuilds cover count changes.
     local installed = false

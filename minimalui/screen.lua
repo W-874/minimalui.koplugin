@@ -8,6 +8,8 @@ local LibraryView = require("minimalui/libraryview")
 local Menu = require("ui/widget/menu")
 local NativeHeaders = require("minimalui/nativeheaders")
 local UIManager = require("ui/uimanager")
+local ViewFooter = require("minimalui/viewfooter")
+local ViewRender = require("minimalui/viewrender")
 local Screen = Device.screen
 
 local MinimalScreen = Menu:extend{
@@ -22,15 +24,15 @@ MinimalScreen.mergeTitleBarIntoLayout = NativeHeaders.mergeTitleBarIntoLayout
 
 function MinimalScreen:init()
     self.width, self.height = Screen:getWidth(), Screen:getHeight()
-    self.is_enable_shortcut = false -- identical rows on touch and keyboard devices
+    self.is_enable_shortcut = Device:hasKeyboard()
     self.custom_title_bar = Header:new{
         width = self.width,
         page = "LIBRARY",
         show_parent = self,
         menu_callback = function() return self.controller:showNativeMenu() end,
-        home_callback = function() return self.controller:showHome() end,
     }
     LibraryView.apply(self)
+    ViewFooter.prepare(self)
     -- Native init computes per-page dimensions before its first updateItems.
     -- current selects the correct page without building it a second time.
     local current = self.item_table.current
@@ -40,6 +42,10 @@ function MinimalScreen:init()
     if not Device:hasDPad() then self.itemnumber = nil end
     Menu.init(self)
     self.item_table.current = current
+    ViewFooter.apply(self, {
+        navigation_icon = "home",
+        navigation_callback = function() return self.controller:showHome() end,
+    })
     -- Released Menu versions bind keys inline and never call registerKeyEvents.
     self:bindKeys()
     if Device:isTouchDevice() then
@@ -64,6 +70,7 @@ function MinimalScreen:bindKeys()
             self.key_events.MinimalMenu = { { { "Menu", "Right" } } }
         end
     end
+    ViewRender.bindShortcuts(self)
 end
 
 function MinimalScreen:onMinimalMenu()

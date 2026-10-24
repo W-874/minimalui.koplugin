@@ -117,6 +117,7 @@ local function signature(menu)
                 add(widget)
                 if not widget._minimal_view_item then
                     add(widget.focused); add(widget.frame and widget.frame.invert); add(widget.enabled); add(widget.text); add(widget.icon)
+                    add(widget.hidden); add(widget.invisible); add(widget.is_inactive)
                 end
             end
         end
@@ -134,9 +135,7 @@ local function syncRoot(menu, state)
     ViewFocus.invalidate(menu)
 end
 
-local function paintTo(menu, bb, x, y)
-    local state = menu._minimal_view_focus
-    if not state then return end
+local function paintTo(menu, bb, x, y, state)
     syncRoot(menu, state)
     local size = menu.dimen or menu:getSize()
     local width, height = size.w, size.h
@@ -178,14 +177,87 @@ local function paintTo(menu, bb, x, y)
     end
 end
 
+local function focusable(widget)
+    return type(widget) == "table" and not widget.is_inactive and widget.enabled ~= false
+        and not widget.hidden and not widget.invisible
+end
+
+local function closestColumn(row, preferred)
+    local best, distance
+    for column, widget in pairs(row) do
+        if type(column) == "number" and focusable(widget) then
+            local delta = math.abs(column - preferred)
+            if not distance or delta < distance or (delta == distance and column < best) then
+                best, distance = column, delta
+            end
+        end
+    end
+    return best
+end
+
+local function moveFocus(menu, current, x, y, native_events)
+    local target = menu.layout[y][x]
+    menu.selected.x, menu.selected.y = x, y
+    -- Native body navigation emits Unfocus/Focus even when distinct layout
+    -- positions share the same active widget. Footer no-ops remain silent.
+    if target == current and not native_events then return end
+    current:handleEvent(Event:new("Unfocus"))
+    target:handleEvent(Event:new("Focus"))
+    local area = current.dimen and target.dimen and current.dimen:combine(target.dimen)
+    if not current._minimal_view_item or not target._minimal_view_item then ViewFocus.invalidate(menu) end
+    UIManager:setDirty(menu.show_parent or menu, function() return "fast", area end)
+end
+
+-- Only transitions touching the footer depart from native body navigation.
+-- Rows can be sparse and buttons may be disabled after a page change.
+local function moveFooter(menu, dx, dy, current)
+    local footer = menu._minimal_view_footer
+    local row = footer and footer.focus_row
+    if not row then return false end
+    local selected = menu.selected
+    local in_footer = menu.layout[selected.y] == row
+    if dx ~= 0 then
+        if not in_footer then return false end
+        local candidate, wrapped
+        for column, widget in pairs(row) do
+            if type(column) == "number" and focusable(widget) then
+                if (column - selected.x) * dx > 0
+                        and (not candidate or (column - candidate) * dx < 0) then candidate = column end
+                if not wrapped or (column - wrapped) * dx < 0 then wrapped = column end
+            end
+        end
+        if candidate or wrapped then moveFocus(menu, current, candidate or wrapped, selected.y) end
+        return true
+    end
+    if dy == 0 then return false end
+    local y = (selected.y - 1 + dy) % #menu.layout + 1
+    if not in_footer and menu.layout[y] ~= row then return false end
+    for _ = 1, #menu.layout do
+        local x = closestColumn(menu.layout[y], selected.x)
+        if x then moveFocus(menu, current, x, y); break end
+        y = (y - 1 + dy) % #menu.layout + 1
+    end
+    return true
+end
+
 function ViewFocus.onFocusMove(self, args)
     if not self.layout then return false end
+    if not Device:hasDPad() and not Device:hasKeyboard() then return true end
+    if not self.selected or not self.layout[self.selected.y]
+            or not self.layout[self.selected.y][self.selected.x] then return true end
     local dx, dy = unpack(args)
+    local current_item = self.layout[self.selected.y][self.selected.x]
+    -- The footer's six slots deliberately retain physical left/right order,
+    -- independently of mirrored body layouts.
+    if (dx == 0 or self.movement_allowed.x) and (dy == 0 or self.movement_allowed.y)
+            and moveFooter(self, dx, dy, current_item) then return true end
+    local state = self._minimal_view_focus
+    if not self._minimalui_view and state and state.original_focus then
+        return state.original_focus(self, args)
+    end
     if dx ~= 0 and BD.mirroredUILayout() then dx = -dx end
     if (dx ~= 0 and not self.movement_allowed.x)
         or (dy ~= 0 and not self.movement_allowed.y) then return true end
-    if not self.layout[self.selected.y] or not self.layout[self.selected.y][self.selected.x] then return true end
-    local current_item = self.layout[self.selected.y][self.selected.x]
     while true do
         if not self.layout[self.selected.y + dy] then
             if not self:_wrapAroundY(dy) then break end
@@ -199,36 +271,69 @@ function ViewFocus.onFocusMove(self, args)
         end
         local next_item = self.layout[self.selected.y][self.selected.x]
         if next_item ~= current_item or not next_item.is_inactive then
-            current_item:handleEvent(Event:new("Unfocus"))
-            next_item:handleEvent(Event:new("Focus"))
-            local area = current_item.dimen and next_item.dimen and current_item.dimen:combine(next_item.dimen)
-            if not current_item._minimal_view_item or not next_item._minimal_view_item then
-                ViewFocus.invalidate(self)
-            end
-            UIManager:setDirty(self.show_parent or self, function() return "fast", area end)
+            moveFocus(self, current_item, self.selected.x, self.selected.y, true)
             break
         end
     end
     return true
 end
 
+local footer_left, footer_right = { -1, 0 }, { 1, 0 }
+local function keyPress(menu, key, repeat_event, state)
+    local footer = menu._minimal_view_footer
+    if Device:hasFewKeys() and footer and menu.selected and menu.layout
+            and menu.layout[menu.selected.y] == footer.focus_row
+            and (key.key == "Left" or key.key == "Right") then
+        return ViewFocus.onFocusMove(menu, key.key == "Left" and footer_left or footer_right)
+    end
+    local fallback = repeat_event and state.original_repeat or state.original_key
+    if fallback then return fallback(menu, key) end
+end
+
+
 function ViewFocus.attach(menu)
     if menu._minimal_view_focus then syncRoot(menu, menu._minimal_view_focus); return end
-    menu._minimal_view_focus = {
+    local state = {
+        active = true,
         raw_paint = rawget(menu, "paintTo"), original_paint = menu.paintTo,
-        raw_focus = rawget(menu, "onFocusMove"),
+        raw_focus = rawget(menu, "onFocusMove"), original_focus = menu.onFocusMove,
+        raw_key = rawget(menu, "onKeyPress"), original_key = menu.onKeyPress,
+        raw_repeat = rawget(menu, "onKeyRepeat"), original_repeat = menu.onKeyRepeat,
     }
-    menu.paintTo, menu.onFocusMove = paintTo, ViewFocus.onFocusMove
-    syncRoot(menu, menu._minimal_view_focus)
+    -- Later plugins may retain these wrappers after release. Capture this
+    -- attachment's fallbacks rather than consulting a removed/replaced state.
+    state.paint = function(instance, bb, x, y)
+        if state.active then return paintTo(instance, bb, x, y, state) end
+        return state.original_paint(instance, bb, x, y)
+    end
+    state.focus = function(instance, args)
+        if state.active then return ViewFocus.onFocusMove(instance, args) end
+        if state.original_focus then return state.original_focus(instance, args) end
+    end
+    state.key = function(instance, key)
+        if state.active then return keyPress(instance, key, false, state) end
+        if state.original_key then return state.original_key(instance, key) end
+    end
+    state.repeat_key = function(instance, key)
+        if state.active then return keyPress(instance, key, true, state) end
+        if state.original_repeat then return state.original_repeat(instance, key) end
+    end
+    menu._minimal_view_focus = state
+    menu.paintTo, menu.onFocusMove = state.paint, state.focus
+    menu.onKeyPress, menu.onKeyRepeat = state.key, state.repeat_key
+    syncRoot(menu, state)
 end
 
 function ViewFocus.release(menu)
     local state = menu._minimal_view_focus
     if not state then return end
+    state.active = false
     ViewFocus.invalidate(menu)
     if state.frame then FramePaint.release(state.frame); state.frame = nil end
-    if menu.paintTo == paintTo then menu.paintTo = state.raw_paint end
-    if menu.onFocusMove == ViewFocus.onFocusMove then menu.onFocusMove = state.raw_focus end
+    if rawget(menu, "paintTo") == state.paint then menu.paintTo = state.raw_paint end
+    if rawget(menu, "onFocusMove") == state.focus then menu.onFocusMove = state.raw_focus end
+    if rawget(menu, "onKeyPress") == state.key then menu.onKeyPress = state.raw_key end
+    if rawget(menu, "onKeyRepeat") == state.repeat_key then menu.onKeyRepeat = state.raw_repeat end
     menu._minimal_view_focus = nil
 end
 

@@ -53,25 +53,13 @@ local function group(items)
     return HorizontalGroup:new(items)
 end
 
--- ListMenu shares one rule between its leading edge and all book separators.
--- Replace only the first slot; leave its height and the shared rule untouched.
-function Header.listBuilder(original)
-    return function(widget, ...)
-        -- FileChooser renderers live on its class and change with display mode.
-        local build = original or getmetatable(widget)._updateItemsBuildUI
-        local selected = build(widget, ...)
-        if widget.display_mode_type == "list" then
-            local first = widget.item_group[1]
-            if getmetatable(first) == LineWidget then
-                widget.item_group[1] = LineWidget:new{ style = "none", dimen = first.dimen }
-            end
-        end
-        return selected
-    end
-end
-
 -- Keep native text intact: callers may need it when restoring the title bar.
 function Header:_resolveText()
+    if self.inline_context then
+        local value = self.context_callback and self.context_callback(self.native_title, self.subtitle)
+            or self.native_title or ""
+        return "KO/" .. value, nil
+    end
     local title = self.fixed_title or self.native_title or ""
     if self.folder_title and not self.fixed_title then
         local folder = self.folder_title():gsub("/+$", ""):match("([^/]+)$") or ""
@@ -126,34 +114,13 @@ function Header:init()
             allow_flash = allow_flash == true,
         }
     end
-    self.menu_button = button("chevron.up", function()
+    self.menu_button = button("appbar.menu", function()
         if self.menu_callback then return self.menu_callback() end
-    end, nil, 180)
-    self.home_button = self.home_callback and button(self.navigation_icon or "home", function()
-        return self.home_callback()
-    end, self.home_hold_callback) or nil
-    self.left_button = self.home_button
-    self.buttons = {}
-    if self.menu_button then table.insert(self.buttons, self.menu_button) end
-    if self.home_button then table.insert(self.buttons, self.home_button) end
-
-    local left_items = {}
+    end)
+    self.left_button = self.menu_button
+    self.buttons = { self.menu_button }
+    local left_items = { self.menu_button }
     local right_items = {}
-    if self.menu_button then table.insert(left_items, self.menu_button) end
-    if self.home_button then table.insert(left_items, self.home_button) end
-    for _, extra in ipairs(self.extra_buttons or {}) do
-        local extra_button = button(extra.icon, extra.callback, extra.hold_callback, nil, extra.allow_flash)
-        if extra_button then
-            if extra.role == "left" then
-                table.insert(left_items, extra_button)
-                self.left_extra_button = self.left_extra_button or extra_button
-            else
-                table.insert(right_items, extra_button)
-                self.right_button = extra_button
-            end
-            table.insert(self.buttons, extra_button)
-        end
-    end
     self.left_group = group(left_items)
     if self.status_widget:getSize().w > 0 then
         table.insert(right_items, HorizontalSpan:new{ width = Size.span.horizontal_small })
@@ -305,14 +272,10 @@ function Header:setSubTitle(subtitle, no_refresh)
     self:_refreshText(no_refresh)
 end
 function Header:setLeftIcon(icon)
-    if not self.left_extra_button or self.left_extra_button.icon == icon then return end
-    self.left_extra_button:setIcon(icon)
-    UIManager:setDirty(self.show_parent, "ui", self.dimen)
+    if self.icon_callback then return self.icon_callback("left", icon) end
 end
 function Header:setRightIcon(icon)
-    if not self.right_button or self.right_button.icon == icon then return end
-    self.right_button:setIcon(icon)
-    UIManager:setDirty(self.show_parent, "ui", self.dimen)
+    if self.icon_callback then return self.icon_callback("right", icon) end
 end
 function Header:generateVerticalLayout()
     local rows = {}

@@ -1,14 +1,23 @@
--- Instance-only three-zone pagination. Native Menu and KeyValuePage retain
--- ownership of the buttons, their callbacks, and the jump/search input dialog.
+-- Instance-only six-slot footer. Native buttons retain pagination, return,
+-- keyboard activation, feedback, and jump/search dialog ownership.
+local Button = require("ui/widget/button")
 local Geom = require("ui/geometry")
-local GestureRange = require("ui/gesturerange")
-local InputContainer = require("ui/widget/container/inputcontainer")
 local OverlapGroup = require("ui/widget/overlapgroup")
+local WidgetContainer = require("ui/widget/container/widgetcontainer")
+local Size = require("ui/size")
 local Screen = require("device").screen
 local T = require("ffi/util").template
 local _ = require("gettext")
 
 local ViewFooter = {}
+local positions = { 0, 72, 192, 264, 336, 528 }
+local generic_icon_size = G_defaults:readSetting("DGENERIC_ICON_SIZE")
+local attributes = {
+    "width", "height", "padding_h", "padding_v", "align", "text_font_bold",
+    "text_font_face", "avoid_text_truncation", "callback", "hold_callback",
+    "overlap_offset", "overlap_align",
+    "icon_width", "icon_height",
+}
 
 local function pack(...)
     return { n = select("#", ...), ... }
@@ -27,122 +36,122 @@ local function replace(root, old, new)
     return changed
 end
 
-local Zone = InputContainer:extend{}
-
-function Zone:init()
-    self.ges_events.MinimalFooterTap = {
-        GestureRange:new{ ges = "tap", range = self.dimen },
-    }
-end
-
-function Zone:paintTo(bb, x, y)
-    self.dimen.x, self.dimen.y = x, y
-    local button, size = self[1], self[1]:getSize()
-    local bx = self.side == "right" and x + self.dimen.w - size.w
-        or self.side == "center" and x + math.floor((self.dimen.w - size.w) / 2) or x
-    button:paintTo(bb, bx, y + math.floor((self.dimen.h - size.h) / 2))
-end
-
-function Zone:onMinimalFooterTap()
-    local button = self[1]
-    if button.enabled and not button.hidden and button.callback then button.callback() end
-    return true
-end
-
-local Footer = OverlapGroup:extend{ allow_mirroring = false }
-
--- Menu:updateItems calls this method on its original HorizontalGroup. Our
--- geometry is fixed, so page changes must not recreate or resize any widget.
-function Footer:resetLayout() end
-
-function Footer:paintTo(bb, x, y)
-    self.dimen.x, self.dimen.y = x, y
-    local left, arrow = self[1], self.menu.page_return_arrow
-    local offset = 0
-    if arrow and not arrow.hidden then
-        offset = math.min(self.third, math.max(0,
-            (arrow.dimen.x or x) + arrow:getSize().w + Screen:scaleBySize(8) - x))
-    end
-    left.overlap_offset[1], left.dimen.w = offset, self.third - offset
-    OverlapGroup.paintTo(self, bb, x, y)
-end
-
 local function hook(record, target, name, handler)
     local original, fallback = rawget(target, name), target[name]
-    local state = { record = record }
+    local state = { record = record, fallback = fallback }
     local wrapper = function(instance, ...)
-        if state.record then return handler(state.record, fallback, instance, ...) end
-        return fallback(instance, ...)
+        if state.record then return handler(state.record, state.fallback, instance, ...) end
+        return state.fallback(instance, ...)
     end
-    record.hooks[#record.hooks + 1] = {
+    local entry = {
         target = target, name = name, original = original, wrapper = wrapper, state = state,
     }
+    record.hooks[#record.hooks + 1] = entry
     target[name] = wrapper
+    return entry
 end
 
 local function pagination(record)
     local menu = record.menu
-    if record.key_value then return menu.pages >= 1, menu.show_page, menu.pages end
+    if record.key_value then return #menu.kv_pairs > 0, menu.show_page, menu.pages end
     return #menu.item_table > 0, menu.page, menu.page_num
 end
 
-local function configureText(record, button, width)
-    if not record.text then
-        record.text = button
-        record.attributes = {}
-        for _, key in ipairs({ "width", "height", "text_font_bold", "text_font_face" }) do
-            record.attributes[key] = { value = rawget(button, key) }
-        end
-        hook(record, button, "setText", function(rec, fallback, target, text, requested_width)
-            if rec.updating then
-                local has_items, page, pages = pagination(rec)
-                if has_items then text = T("%1/%2", page, pages) end
-                -- Button:setText's fixed-width path updates its existing label.
-                requested_width = target.width
-            end
-            return fallback(target, text, requested_width)
-        end)
-    end
-    if button.width ~= width or not button.text_font_bold or button.text_font_face ~= "cfont" then
-        local label_height = button.label_container:getSize().h
-        button.width, button.height = width, label_height
+local function saveButton(record, button)
+    if record.saved[button] then return end
+    local saved = {}
+    for _, key in ipairs(attributes) do saved[key] = { value = rawget(button, key) } end
+    record.saved[button] = saved
+end
+
+local function sizeButton(record, button, width, height)
+    saveButton(record, button)
+    local text = button == record.menu.page_info_text
+    -- Native Button defaults use screen density, which can exceed the footer
+    -- height after a narrower window resize. Scale glyphs with their regions
+    -- using the native generic icon size at the same 600px design baseline.
+    local icon_size = math.min(width, height, math.floor(height * generic_icon_size / 50 + 0.5))
+    if button.width == width and button.height == height and button.padding_h == 0
+            and button.padding_v == 0 and button.align == "center"
+            and (text and button.text_font_bold and button.text_font_face == "cfont"
+                or not text and button.icon_width == icon_size and button.icon_height == icon_size) then return end
+    local invert = button.frame and button.frame.invert
+    local hidden = button.hidden
+    button:show()
+    button.width, button.height = width, height
+    button.padding_h, button.padding_v, button.align = 0, 0, "center"
+    if text then
         button.text_font_bold, button.text_font_face = true, "cfont"
-        button.label_widget:free()
-        button:init()
+        -- Long localized "No items" labels must not rebuild the button on each
+        -- page. The fixed slot clips its text instead of changing its geometry.
+        button.avoid_text_truncation = false
+    else
+        button.icon_width, button.icon_height = icon_size, icon_size
+    end
+    button.label_widget:free()
+    button:init()
+    if button == record.navigation_button or button == record.action_button then
+        -- Native OPDS popups anchor to IconButton.image rather than the tap
+        -- region. Keep that interface on our owned buttons' actual glyphs.
+        button.image = button.label_widget
+    end
+    button.frame.invert = invert
+    button:showHide(not hidden)
+end
+
+local function setIcon(button, icon)
+    if not icon or icon == button.icon then return end
+    local hidden, invert = button.hidden, button.frame.invert
+    button:show()
+    button:setIcon(icon, button.width)
+    button.image = button.label_widget
+    button.frame.invert = invert
+    button:showHide(not hidden)
+end
+
+local function removeFocusRow(record)
+    local layout = record.menu.layout
+    if not layout then return end
+    for i = #layout, 1, -1 do
+        if layout[i] == record.buttons then table.remove(layout, i) end
     end
 end
 
-local function ensure(record, after_init)
-    local menu = record.menu
-    if not menu or menu._minimal_view_footer ~= record then return false end
-    if not menu.page_info or not menu.page_info_text then return false end
-    if menu.page_info == record.footer then
-        -- KeyValuePage populates before assigning its final tree. Its local
-        -- BottomContainer still points at the native group until init returns.
-        if after_init then replace(menu, record.original, record.footer) end
-        return true
+local function focusRow(record)
+    local menu, row = record.menu, record.buttons
+    if not menu.layout then return end
+    local selected = menu.selected and menu.layout[menu.selected.y]
+    selected = selected and selected[menu.selected.x]
+    local count, changed = 0, false
+    for _, button in ipairs(record.footer) do
+        if not button.hidden and button.enabled then
+            count = count + 1
+            if row[count] ~= button then
+                row[count], changed = button, true
+            end
+        end
     end
-    -- A native init has made a fresh HorizontalGroup and BottomContainer.
-    local original = menu.page_info
-    local width = record.key_value and menu.dimen.w or menu.inner_dimen.w
-    local height, third = original:getSize().h, math.floor(width / 3)
-    configureText(record, menu.page_info_text, third)
-    local function zone(button, side, x, w)
-        return Zone:new{
-            dimen = Geom:new{ w = w, h = height }, side = side,
-            overlap_offset = { x, 0 }, button,
-        }
+    if #row ~= count then changed = true end
+    for i = #row, count + 1, -1 do row[i] = nil end
+    -- Paint still checks live visibility/enabled state, but an unchanged final
+    -- row needs neither layout surgery nor a full search for the focused item.
+    if not changed and count > 0 and menu.layout[#menu.layout] == row then return end
+    removeFocusRow(record)
+    if count > 0 then menu.layout[#menu.layout + 1] = row end
+    -- Appending the row must not steal initial content focus. Retain an
+    -- already-focused footer button when live context changes its neighbours.
+    if selected and menu.selected then
+        for y, widgets in ipairs(menu.layout) do
+            for x, button in ipairs(widgets) do
+                if button == selected then
+                    menu.selected.x, menu.selected.y = x, y
+                    return
+                end
+            end
+        end
+        selected:onUnfocus()
+        menu.selected.x, menu.selected.y = 1, 1
     end
-    local footer = Footer:new{
-        dimen = Geom:new{ w = width, h = height }, menu = menu, third = third,
-        zone(menu.page_info_left_chev, "left", 0, third),
-        zone(menu.page_info_text, "center", third, third),
-        zone(menu.page_info_right_chev, "right", 2 * third, width - 2 * third),
-    }
-    record.original, record.footer = original, footer
-    menu.page_info = footer
-    replace(menu, original, footer)
-    return true
 end
 
 local function finish(record)
@@ -150,19 +159,181 @@ local function finish(record)
     if not menu or menu._minimal_view_footer ~= record then return end
     menu.page_info_first_chev:hide()
     menu.page_info_last_chev:hide()
-    -- Native disables the input on a one-page menu. Keep native jump/search
-    -- available there too; an empty menu retains its native No items behavior.
-    if pagination(record) then menu.page_info_text:enable() end
+    menu.page_info_left_chev:show()
+    menu.page_info_right_chev:show()
+    local has_items = pagination(record)
+    if has_items then menu.page_info_text:enable() end
+    if not has_items then
+        menu.page_info_left_chev:disable()
+        menu.page_info_right_chev:disable()
+    end
+    local stack = menu.item_table_stack
+    local has_stack = stack and #stack > 0
+    local can_return = record.key_value and menu.callback_return ~= nil
+        or not record.key_value and (menu.onReturn ~= nil or has_stack or menu.paths and #menu.paths > 0)
+    local context = record.context
+    if context.return_visible ~= nil then
+        local visible = context.return_visible
+        if type(visible) == "function" then visible = visible() end
+        can_return = can_return and visible
+    end
+    local arrow = menu.page_return_arrow
+    -- Nested plain Menu uses onClose to pop its native item_table_stack.
+    -- FileChooser/OPDS/KeyValuePage keep their original return callback.
+    arrow.callback = has_stack and not menu.onReturn and record.stack_return_callback
+        or record.saved[arrow].callback.value
+    arrow:showHide(can_return)
+    arrow:enableDisable(not not can_return)
+    local nav, action = record.navigation_button, record.action_button
+    nav.callback, nav.hold_callback = context.navigation_callback, context.navigation_hold_callback
+    local navigation_icon = context.navigation_icon
+    setIcon(nav, navigation_icon)
+    local show_navigation = navigation_icon ~= nil and nav.callback ~= nil
+    nav:showHide(show_navigation)
+    nav:enableDisable(show_navigation)
+    local icon = context.action_icon
+    if type(icon) == "function" then icon = icon() end
+    action.callback, action.hold_callback = context.action_callback, context.action_hold_callback
+    setIcon(action, icon)
+    local show_action = icon ~= nil and action.callback ~= nil
+    action:showHide(show_action)
+    action:enableDisable(show_action)
+    focusRow(record)
 end
 
-function ViewFooter.apply(menu)
+local Footer = OverlapGroup:extend{ allow_mirroring = false }
+function Footer:init() end
+function Footer:resetLayout() end
+function Footer:getSize() return self.dimen end
+function Footer:paintTo(bb, x, y)
+    self.dimen.x, self.dimen.y = x, y
+    finish(self.record)
+    OverlapGroup.paintTo(self, bb, x, y)
+end
+
+local function geometry(record, width)
+    local footer = record.footer
+    local height = math.floor(width * 50 / 600 + 0.5)
+    if footer.dimen.w == width and footer.dimen.h == height then return false end
+    footer.dimen.w, footer.dimen.h = width, height
+    record.sizing.h = math.max(0, height - Size.padding.button)
+    for i, button in ipairs(footer) do
+        local x = math.floor(width * positions[i] / 600 + 0.5)
+        local edge = math.floor(width * (positions[i] + 72) / 600 + 0.5)
+        button.overlap_offset[1] = x
+        sizeButton(record, button, edge - x, height)
+    end
+    return true
+end
+
+local function ensure(record, after_init)
+    local menu = record.menu
+    if not menu or menu._minimal_view_footer ~= record then return false end
+    geometry(record, record.key_value and menu.dimen.w or menu.inner_dimen.w)
+    local sizing_hook = record.dimension_hook
+    if sizing_hook and menu._recalculateDimen ~= sizing_hook.wrapper then
+        -- ViewSettings swaps the native renderer's calculator on each update.
+        -- Rearm one retained hook around the latest implementation, not around
+        -- an accumulating chain of obsolete per-render wrappers.
+        sizing_hook.original = rawget(menu, "_recalculateDimen")
+        sizing_hook.state.fallback = menu._recalculateDimen
+        menu._recalculateDimen = sizing_hook.wrapper
+    end
+    local rebuilt = menu.page_info ~= record.footer or menu.return_button ~= record.empty_return
+    if menu.page_info ~= record.footer then record.original = menu.page_info end
+    if menu.return_button ~= record.empty_return then record.original_return = menu.return_button end
+    menu.page_info, menu.return_button = record.footer, record.empty_return
+    -- Both KeyValuePage and direct Menu.init callers can adapt page_info
+    -- before native init assembles its final local BottomContainers. Track
+    -- the actual tree root, not just the public page_info reference.
+    if rebuilt or after_init or record.tree_root ~= menu[1] then
+        replace(menu, record.original, record.footer)
+        replace(menu, record.original_return, record.empty_return)
+        record.tree_root = menu[1]
+    end
+    return true
+end
+
+local function layoutKeyValue(menu)
+    local available = menu.dimen.h - menu.title_bar:getHeight() - Size.span.vertical_large
+        - (menu.single_page and 0 or menu.page_info:getSize().h) - 2 * Size.line.thick
+    menu.item_height = math.floor(available / menu.items_per_page)
+    menu.items_font_size = math.min(require("ui/widget/textboxwidget"):getFontSizeToFitHeight(
+        menu.item_height, 1, 1.0), 22)
+    local function spacing(root)
+        for i, child in ipairs(root) do
+            if child == menu.title_bar and root[i + 1] then
+                root[i + 1].width = math.floor((available - menu.items_per_page * menu.item_height) / 2)
+                return true
+            elseif type(child) == "table" and spacing(child) then return true end
+        end
+    end
+    spacing(menu)
+    menu:_populateItems()
+    replace(menu, menu.title_bar, menu.title_bar)
+end
+
+function ViewFooter.apply(menu, context, before_init)
     if not menu or not menu.page_info or not menu.page_info_text then return false end
     local record = menu._minimal_view_footer
-    if record then ensure(record); finish(record); return true end
-    record = { menu = menu, hooks = {}, key_value = not menu.updatePageInfo and menu._populateItems ~= nil }
+    if record and record.releasing then return false end
+    if record then
+        if context ~= nil then record.context = context end
+        ensure(record)
+        if not before_init then finish(record) end
+        return true
+    end
+    record = {
+        menu = menu, context = context or {}, hooks = {}, saved = {}, buttons = {},
+        key_value = not menu.updatePageInfo and menu._populateItems ~= nil,
+        sizing = Geom:new{},
+        empty_return = WidgetContainer:new{ dimen = Geom:new{ w = 0, h = 0 } },
+    }
+    record.empty_return.resetLayout = function() end
+    record.focus_row = record.buttons
+    record.stack_return_callback = function() menu:onClose() end
+    record.navigation_button = Button:new{ icon = "home", bordersize = 0, show_parent = menu.show_parent or menu }
+    record.action_button = Button:new{ icon = "appbar.menu", bordersize = 0, show_parent = menu.show_parent or menu }
+    record.footer = Footer:new{
+        dimen = Geom:new{ w = 0, h = 0 }, record = record,
+        menu.page_return_arrow, record.navigation_button, menu.page_info_left_chev,
+        menu.page_info_text, menu.page_info_right_chev, record.action_button,
+    }
+    for _, button in ipairs(record.footer) do
+        saveButton(record, button)
+        button.overlap_offset, button.overlap_align = { 0, 0 }, nil
+    end
     menu._minimal_view_footer = record
+    hook(record, menu.page_info_text, "setText", function(rec, fallback, target, text, width)
+        if rec.updating then
+            local has_items, page, pages = pagination(rec)
+            text = has_items and T("%1/%2", page, pages) or _("No items")
+            width = target.width
+        end
+        return fallback(target, text, width)
+    end)
+    if not record.key_value then
+        -- Native Menu reserves max(return, page text) + button padding. Its
+        -- sizing probe excludes that padding because the new height includes it.
+        for _, button in ipairs({ menu.page_return_arrow, menu.page_info_text }) do
+            hook(record, button, "getSize", function(rec, fallback, target, ...)
+                if rec.recalculating then return rec.sizing end
+                return fallback(target, ...)
+            end)
+        end
+        record.dimension_hook = hook(record, menu, "_recalculateDimen", function(rec, fallback, target, ...)
+            ensure(rec)
+            rec.recalculating = true
+            local result = pack(pcall(fallback, target, ...))
+            rec.recalculating = nil
+            if not result[1] then error(result[2], 0) end
+            return unpack(result, 2, result.n)
+        end)
+    end
     hook(record, menu, record.key_value and "_populateItems" or "updatePageInfo", function(rec, fallback, target, ...)
         ensure(rec)
+        -- Native focus selection must see content, never the prior footer row.
+        removeFocusRow(rec)
         rec.updating = true
         local result = pack(pcall(fallback, target, ...))
         rec.updating = nil
@@ -171,47 +342,76 @@ function ViewFooter.apply(menu)
         return unpack(result, 2, result.n)
     end)
     hook(record, menu, "init", function(rec, fallback, target, ...)
+        -- Native KeyValuePage reads its fresh group's height before population.
+        -- Size its retained buttons before native init performs that calculation.
+        if rec.key_value then geometry(rec, target.width or Screen:getWidth()) end
         local result = pack(fallback(target, ...))
-        ensure(rec, true)
-        finish(rec)
+        if ensure(rec, true) then finish(rec) end
         return unpack(result, 1, result.n)
     end)
     ensure(record)
-    record.updating = true
-    menu.page_info_text:setText(pagination(record) and "" or _("No items"))
-    record.updating = nil
-    finish(record)
+    if not before_init then
+        if record.key_value then layoutKeyValue(menu)
+        else menu:updateItems(1, false) end
+        finish(record)
+    end
     return true
 end
 
-function ViewFooter.release(menu)
+-- Arm only a caller's upcoming native Menu.init. Its first sizing call happens
+-- after buttons exist, but before content is built; ordinary apply still reflows
+-- an already-built menu whose rows were sized for the native footer.
+function ViewFooter.prepare(menu)
+    local original, fallback = rawget(menu, "_recalculateDimen"), menu._recalculateDimen
+    menu._recalculateDimen = function(target, ...)
+        target._recalculateDimen = original
+        ViewFooter.apply(target, nil, true)
+        if target._minimal_view_footer then return target:_recalculateDimen(...) end
+        return fallback(target, ...)
+    end
+end
+
+function ViewFooter.release(menu, reflow)
     local record = menu and menu._minimal_view_footer
     if not record then return false end
+    record.releasing = true
+    removeFocusRow(record)
     for i = #record.hooks, 1, -1 do
         local h = record.hooks[i]
         h.state.record = nil
         if rawget(h.target, h.name) == h.wrapper then h.target[h.name] = h.original end
     end
-    if menu.page_info == record.footer then
-        replace(menu, record.footer, record.original)
-        menu.page_info = record.original
+    replace(menu, record.footer, record.original)
+    replace(menu, record.empty_return, record.original_return)
+    menu.page_info, menu.return_button = record.original, record.original_return
+    for button, saved in pairs(record.saved) do
+        if button ~= record.navigation_button and button ~= record.action_button then
+            for key, value in pairs(saved) do button[key] = value.value end
+            local hidden = button.hidden
+            button:show()
+            button.label_widget:free()
+            button:init()
+            button:showHide(not hidden)
+        end
     end
     local has_items, page, pages = pagination(record)
-    local button = record.text
-    if button then
-        for key, saved in pairs(record.attributes) do button[key] = saved.value end
-        button.text = has_items and T(_("Page %1 of %2"), page, pages) or _("No items")
-        button.label_widget:free()
-        button:init()
-        if has_items and pages > 1 then button:enable()
-        else button:disableWithoutDimming() end
+    local text = menu.page_info_text
+    text.text = has_items and T(_("Page %1 of %2"), page, pages) or _("No items")
+    text.label_widget:free()
+    text:init()
+    menu.page_info:resetLayout()
+    menu.return_button:resetLayout()
+    -- A closing/rebuilding owner restores its renderer separately. Never start
+    -- a native row/extraction rebuild there after its jobs were cancelled.
+    if reflow ~= false then
+        -- Visible standalone release restores current geometry and state, not
+        -- stale pagination captured before navigation.
+        if record.key_value then layoutKeyValue(menu)
+        else menu:updateItems(1, false) end
     end
-    for _, name in ipairs({ "first", "last" }) do
-        local chev = menu["page_info_" .. name .. "_chev"]
-        chev:showHide(has_items)
-    end
-    if menu.page_info.resetLayout then menu.page_info:resetLayout() end
     menu._minimal_view_footer = nil
+    record.navigation_button:free()
+    record.action_button:free()
     record.menu = nil
     return true
 end

@@ -1,13 +1,31 @@
 local Bridge = {}
 local pending_destination
+local home_id = "minimalui_home"
 
-local function finishDestination(previous, ok, ...)
-    local route = pending_destination
+local function copy(source)
+    local target = {}
+    for key, value in pairs(source) do target[key] = value end
+    return target
+end
+
+local function remapIndex(index, source, target)
+    local selected = index and source and source[index]
+    if not selected then return index end
+    if selected.id ~= home_id then
+        for position, item in ipairs(target or {}) do
+            if item == selected or selected.id and item.id == selected.id then return position end
+        end
+    end
+    return 1
+end
+
+local function finishEntry(bridge, previous, route, ok, ...)
     pending_destination = previous
+    bridge.entry_depth = bridge.entry_depth - 1
     if not ok then error((...), 0) end
-    if route and route.destination == nil then
-        -- The new FM has consumed the route and is now shown. Finish its
-        -- startup before the current native input callback can repaint it.
+    if not previous and route.destination == nil then
+        -- FileManager post-init consumed the route before its first show.
+        -- Complete startup before the native input callback can repaint it.
         local manager = require("apps/filemanager/filemanager").instance
         local controller = manager and manager.minimalui
         if controller and controller.start_task then
@@ -19,29 +37,12 @@ local function finishDestination(previous, ok, ...)
     return ...
 end
 
-local function finishEntry(bridge, ok, ...)
-    bridge.entry_depth = bridge.entry_depth - 1
-    if bridge.entry_depth == 0 and not bridge.installed then bridge:restore() end
-    if not ok then error((...), 0) end
-    return ...
-end
-
-local function finishMenu(bridge, ...)
-    local menu_items = bridge.controller.ui.menu.menu_items
-    local entry = menu_items and menu_items.filemanager
-    if not entry then
-        for _, tab in ipairs(bridge.controller.ui.menu.tab_item_table or {}) do
-            if tab.id == "filemanager" then entry = tab; break end
-        end
+local function finishMenu(bridge, source, index, ...)
+    if bridge.installed then
+        local menu = bridge.controller.ui.menu
+        menu.last_tab_index = remapIndex(index, source, menu.tab_item_table)
+        bridge:updateMenu()
     end
-    for i = #bridge.wrappers, 1, -1 do
-        local record = bridge.wrappers[i]
-        if record.method == "callback" and record.instance ~= entry then
-            if record.instance.callback == record.wrapper then record.instance.callback = record.original end
-            table.remove(bridge.wrappers, i)
-        end
-    end
-    bridge:watch(entry, "callback", false)
     return ...
 end
 
@@ -62,67 +63,168 @@ function Bridge.takeDestination()
     return destination
 end
 
-function Bridge:watch(instance, method, is_destination)
+function Bridge:watch(instance, method, destination)
     if not instance or type(instance[method]) ~= "function" then return end
     for _, record in ipairs(self.wrappers) do
         if record.instance == instance and record.method == method then return end
     end
     local original, fallback = rawget(instance, method), instance[method]
     local wrapper
-    if is_destination == "menu" then
+    if destination == "menu" then
         wrapper = function(...)
             if not self.installed then return fallback(...) end
-            return finishMenu(self, fallback(...))
-        end
-    elseif is_destination then
-        wrapper = function(...)
-            -- Only the menu/status browser entries opt in. Reader Home and
-            -- other native callers retain the normal FileManager startup.
-            if self.entry_depth == 0 then return fallback(...) end
-            local previous = pending_destination
-            pending_destination = previous or { destination = "library" }
-            return finishDestination(previous, pcall(fallback, ...))
+            self:removeTab()
+            local menu = self.controller.ui.menu
+            return finishMenu(self, menu.tab_item_table, menu.last_tab_index, fallback(...))
         end
     else
         wrapper = function(...)
-            -- A later plugin may retain this wrapper after our restore.
+            -- Another plugin may retain this wrapper after our restore.
             if not self.installed then return fallback(...) end
+            local previous = pending_destination
+            local route = previous or { destination = destination }
+            pending_destination = route
             self.entry_depth = self.entry_depth + 1
-            return finishEntry(self, pcall(fallback, ...))
+            -- Native onClose finalizes plugins before showFileManager. The
+            -- active closure owns this route even after all hooks are restored.
+            return finishEntry(self, previous, route, pcall(fallback, ...))
         end
     end
     self.wrappers[#self.wrappers + 1] = {
-        instance = instance, method = method, original = original,
-        wrapper = wrapper, is_destination = is_destination,
+        instance = instance, method = method, original = original, wrapper = wrapper,
     }
     instance[method] = wrapper
+end
+
+function Bridge:restoreCallbacks()
+    for i = #self.wrappers, 1, -1 do
+        local record = self.wrappers[i]
+        if record.method == "callback" then
+            if record.instance.callback == record.wrapper then record.instance.callback = record.original end
+            table.remove(self.wrappers, i)
+        end
+    end
+end
+
+function Bridge:closeMenu()
+    local menu = self.controller.ui.menu
+    -- A live TouchMenu retains its own table and numeric bar callbacks. Close
+    -- it natively before changing the cached table, never mutate that array.
+    if menu and menu.menu_container and menu.onCloseReaderMenu then menu:onCloseReaderMenu() end
+end
+
+function Bridge:removeTab()
+    local menu = self.controller.ui.menu
+    if self.tab_table and menu.tab_item_table == self.tab_table then
+        self:closeMenu()
+        menu.last_tab_index = remapIndex(menu.last_tab_index, self.tab_table, self.tab_source)
+        menu.tab_item_table = self.tab_source
+    elseif self.home_tab and menu and menu.tab_item_table then
+        local source = menu.tab_item_table
+        local tabs
+        for i, item in ipairs(source) do
+            if item.id == home_id and item.callback == self.home_tab.callback then
+                if not tabs then tabs = copy(source) end
+                tabs[i] = false
+            end
+        end
+        if tabs then
+            self:closeMenu()
+            local target = {}
+            for _, item in ipairs(tabs) do
+                if item then
+                    for _, record in ipairs(self.wrappers) do
+                        if record.method == "callback" and item.callback == record.wrapper then
+                            item = copy(item)
+                            item.callback = record.original
+                            break
+                        end
+                    end
+                    target[#target + 1] = item
+                end
+            end
+            menu.last_tab_index = remapIndex(menu.last_tab_index, source, target)
+            menu.tab_item_table = target
+        end
+    end
+    self.tab_table, self.tab_source = nil, nil
+    self:restoreCallbacks()
+    if self.menu_items and menu.menu_items == self.menu_items then menu.menu_items = self.menu_source end
+    self.menu_items, self.menu_source = nil, nil
+end
+
+function Bridge:updateMenu()
+    local ui = self.controller.ui
+    local menu = ui.menu
+    if not menu then return end
+    local source = menu.tab_item_table
+    if source then
+        local filemanager
+        for _, item in ipairs(source) do
+            if item.id == "filemanager" then filemanager = item; break end
+        end
+        if not filemanager then return end
+        self:closeMenu()
+        local tabs = copy(source)
+        for i = #tabs, 1, -1 do
+            if tabs[i].id == home_id then table.remove(tabs, i) end
+        end
+        for i, item in ipairs(tabs) do
+            if item == filemanager then
+                -- Callback wrapping is private too: native/shared source entries
+                -- and the cached reader_menu_order module remain untouched.
+                tabs[i] = copy(item)
+                self:watch(tabs[i], "callback", "library")
+                table.insert(tabs, i + 1, self.home_tab)
+                break
+            end
+        end
+        menu.last_tab_index = remapIndex(menu.last_tab_index, source, tabs)
+        self.tab_source, self.tab_table = source, tabs
+        menu.tab_item_table = tabs
+    elseif menu.menu_items and menu.menu_items.filemanager then
+        -- Before the first native sort the action still lives in menu_items.
+        -- Give MenuSorter a private map; it consumes entries while sorting.
+        local items = copy(menu.menu_items)
+        items.filemanager = copy(items.filemanager)
+        self.menu_source, self.menu_items = menu.menu_items, items
+        menu.menu_items = items
+        self:watch(items.filemanager, "callback", "library")
+    end
 end
 
 function Bridge:install()
     if self.installed then return end
     self.installed = true
     local ui = self.controller.ui
-    self:watch(ui, "showFileManager", true)
-    self:watch(ui.status, "openFileBrowser", false)
-    self:watch(ui.menu, "setUpdateItemTable", "menu")
-    local menu_items = ui.menu and ui.menu.menu_items
-    self:watch(menu_items and menu_items.filemanager, "callback", false)
+    local menu = ui.menu
+    self.home_tab = {
+        id = home_id,
+        icon = "home",
+        remember = false,
+        callback = function()
+            -- Closing a native menu may immediately free its button widgets.
+            -- Own ReaderUI/menu references before close; never read a button.
+            local reader, reader_menu = ui, menu
+            reader_menu:onTapCloseMenu()
+            return reader:onHome()
+        end,
+    }
+    self:watch(ui, "onHome", "home")
+    self:watch(ui.status, "openFileBrowser", "library")
+    self:watch(menu, "setUpdateItemTable", "menu")
+    self:updateMenu()
 end
 
 function Bridge:restore()
     self.installed = false
+    self:removeTab()
     for i = #self.wrappers, 1, -1 do
         local record = self.wrappers[i]
-        -- Native browser entries close/save the reader before calling
-        -- showFileManager. Finalize/CloseWidget can stop this plugin during
-        -- that close: keep only the destination wrapper until the entry exits.
-        if record.is_destination ~= true or self.entry_depth == 0 then
-            if record.instance[record.method] == record.wrapper then
-                record.instance[record.method] = record.original
-            end
-            table.remove(self.wrappers, i)
-        end
+        if record.instance[record.method] == record.wrapper then record.instance[record.method] = record.original end
+        self.wrappers[i] = nil
     end
+    self.home_tab = nil
 end
 
 return Bridge

@@ -138,8 +138,12 @@ function Cover.resolve(path)
         local attr = lfs.attributes(source)
         local book = custom and lfs.attributes(path) or attr
         if not attr or attr.mode ~= "file" or not book or book.mode ~= "file" then return end
-        -- Resolve the actual saved provider, not the sidecar's modification
-        -- time: ordinary progress/annotation saves do not change cover pixels.
+        -- Native history updates atime with lfs.touch(file, now, mtime).
+        -- That also changes ctime, not the book's bytes. Use the native book
+        -- identity (size/mtime/device/inode); keep ctime for a separate custom
+        -- image. Metadata events still invalidate same-second native edits.
+        -- Resolve the actual provider, not the sidecar's modification time:
+        -- ordinary progress/annotation saves do not change cover pixels.
         local provider = DocumentRegistry:getProvider(source)
         local fallback = custom and DocumentRegistry:getProvider(path) or provider
         if not provider or not fallback then return end
@@ -148,9 +152,9 @@ function Cover.resolve(path)
         local cre = require("libs/libkoreader-cre")
         local family = G_reader_settings:readSetting("cre_font_family_fonts") or {}
         return table.concat({
-            source, tostring(attr.size), tostring(attr.modification), tostring(attr.change),
+            source, tostring(attr.size), tostring(attr.modification), tostring(custom and attr.change),
             tostring(attr.ino), tostring(attr.dev), tostring(book.size), tostring(book.modification),
-            tostring(book.change), tostring(book.ino), tostring(book.dev),
+            tostring(book.ino), tostring(book.dev),
             tostring(provider.provider), tostring(fallback.provider),
             tostring(reader_font), tostring(cre.getGammaIndex()),
             tostring(G_reader_settings:readSetting("monospace_font")),

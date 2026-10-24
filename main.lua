@@ -57,8 +57,8 @@ function MinimalUI:init()
         self.reader_bridge = ReaderBridge:new{ controller = self }
         self.native_headers = NativeHeaders:new{ controller = self }
         if self:isEnabled() then
-            ViewSettings.install(self)
             self.reader_bridge:install()
+            ViewSettings.install(self)
             self.native_headers:apply(false)
             self:bindMetadataEvents()
         end
@@ -426,11 +426,13 @@ end
 function MinimalUI:onCloseWidget()
     self.closed = true
     self:stopClock()
+    -- ViewSettings may retain a copy of ReaderBridge's augmented tab array.
+    -- Unwind that menu layer first so the bridge cannot be resurrected.
+    ViewSettings.restore(self)
     if self.reader_bridge then self.reader_bridge:restore() end
     self:restoreBrowserNavigation()
     self:restoreMetadataEvents()
     if self.native_headers then self.native_headers:restore() end
-    ViewSettings.restore(self)
     if self.start_task then
         UIManager:unschedule(self.start_task)
         self.start_task = nil

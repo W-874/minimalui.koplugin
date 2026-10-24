@@ -2,13 +2,13 @@
 
 轻量的 KOReader Home 与 Library 界面，适用于键盘、少键和触屏电子阅读器。
 
-**v0.6.6** 提供继续阅读、最近阅读、Favorites独立入口、统一书籍列表／网格、六插槽底栏与硬件键盘列表快捷键，并修复Reader返回Home时重复提取封面的开销。阅读器、设置、文件操作与元数据仍复用KOReader原生能力。
+**v0.6.7** 在继续阅读、最近阅读、Favorites、统一书籍列表／网格和六插槽底栏基础上，修复普通阅读历史触碰导致的封面缓存误失效，并在阅读器顶部菜单的 Library 图标之后增加直接 Home 按钮。阅读器、设置、文件操作与元数据仍复用 KOReader 原生能力。
 
-使用 `minimalui-v0.6.6.zip` 安装，旧 `minimalui-v0.6.5.zip` 保留回退。打包及Git推送不等于创建GitHub Release；桌面验证不能代替Kindle实机响应与电子墨水验收。
+v0.6.7 使用仓库源码安装；本次仅提交并推送代码，未另打安装包或创建 GitHub Release。现有 `minimalui-v0.6.6.zip` 不包含 v0.6.7 修改，旧 `minimalui-v0.6.5.zip` 保留回退。桌面验证不能代替 Kindle 实机响应与电子墨水验收。
 
 ## 安装
 
-1. 使用 `minimalui-v0.6.6.zip` 安装包时，解压后直接使用其中的 `minimalui.koplugin` 目录。也可下载仓库源码ZIP并将目录命名为 `minimalui.koplugin`，或使用Git（仓库版本以 `_meta.lua` 为准）：
+1. 下载仓库源码 ZIP 并将目录命名为 `minimalui.koplugin`，或使用 Git（仓库版本以 `_meta.lua` 为准）。已有 v0.6.6 安装包仍可安装，但不包含下述 v0.6.7 修正：
 
    ```sh
    git clone https://github.com/W-874/minimalui.koplugin.git
@@ -113,6 +113,14 @@ Press／Enter 始终打开当前选中项，不固定指向继续阅读卡片。
 - **Navigation details**：Library与Favorites显示数量，空／来源不可用显示0；History显示有效历史数量，File Browser显示当前路径。Library使用与书库相同的当前层／格式／符号链接规则计数，不排序或加载元数据。
 
 开关只影响 Home 显示，不删除书籍或阅读数据。原生阅读器与 CoverBrowser 的设置仍在各自菜单中调整。
+
+## v0.6.7 更新：Reader 返回与 Home 菜单按钮
+
+- 阅读器顶部菜单在返回 Library 图标之后增加 Home 图标，直接保存、关闭当前书籍并回到主页；Library 按钮仍回书库，阅读器 Home 键仍回主页。沿用原生保存与关闭，不保留 Reader 或文档。
+- 修复普通未读完书籍打开时，原生历史更新访问时间引起 `ctime` 变化、误使封面缓存失效的问题。书籍指纹保留修改时间、大小、设备／inode、provider 与绘制上下文；独立自定义封面仍检查 `ctime`，元数据事件仍显式失效。
+- 不为封面缓存扫描或散列整本书。外部工具若原地改写内容并刻意保持大小、修改时间和 inode，又不发送元数据事件，缓存不能识别这类修改；重新进入插件可重新加载。
+- 旧验收使用冻结历史的已读完书籍，不能代表普通阅读路径；现改为跨秒的未读完 EPUB 往返，验证封面复用、进度保存和停用释放。原生 Files 初始扫描、Reader 保存和冷后台提取成本仍存在，实机效果仍需复测。
+- v0.6.7 随仓库源码交付；本次不另打 ZIP，现有 v0.6.6 ZIP 保持原字节且不包含这些修改。
 
 ## v0.6.6 更新
 
